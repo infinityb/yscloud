@@ -1,0 +1,23 @@
+[package]
+name = "linker"
+version = "0.1.0"
+authors = ["Stacey Ell <stacey.ell@gmail.com>"]
+edition = "2018"
+
+[dependencies]
+clap = "2.32"
+signal-hook = "0.1"
+env_logger = "0.6"
+log = "0.4"
+nix = "0.13"
+rand = "*"
+registry-model = { path = "../registry-model" }
+semver = { version = "0.9.0", features = ["serde"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tempfile = "3"
+uuid = { version = "0.6", features = ["v4", "serde"] }
+users = "0.9.1"
+# sodiumoxide = "*"
+# git2 = "*"
+# toml = "0.4"

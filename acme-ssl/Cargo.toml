@@ -1,0 +1,9 @@
+[package]
+name = "acme-ssl"
+version = "0.1.0"
+authors = ["Stacey Ell <stacey.ell@gmail.com>"]
+edition = "2018"
+
+[dependencies]
+openssl = "0.10"
+log = "0.3"

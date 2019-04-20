@@ -1,0 +1,12 @@
+[workspace]
+members = [
+	"acme-ssl",
+	"blog",
+	"blog/hyper-staticfile",
+	"infra/cloudsafe",
+	"infra/memfd",
+	"infra/tokio-sendfd",
+	"linker",
+	"publish-release",
+	"registry-model",
+]

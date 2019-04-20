@@ -1,0 +1,48 @@
+[package]
+name = "ircc-daemon"
+version = "0.1.1"
+authors = [ "Stacey Ell <stacey.ell@gmail.com>" ]
+edition = "2018"
+build = "build.rs"
+
+[dependencies]
+anymap = "0.12.1"
+autocert = { path = "../../autocert" }
+byteorder = "1"
+bytes = "*"
+dbframe2 = { path = "../../dbframe2" }
+env_logger = "*"
+futures = "0.1"
+futures-cpupool = "0.1.8"
+irc = { path = "../../irc" }
+log = "*"
+openssl = "0.10"
+prost = "*"
+prost-derive = "*"
+rand = "0.6"
+rust-argon2 = "0.4.0"
+serde = "1.0.88"
+serde_derive = "1.0.88"
+slog = "*"
+slog-async = "*"
+slog-term = "*"
+time = "*"
+tokio-core = "*"
+tokio-haproxy = { path = "../../tokio-haproxy" }
+tokio-io = "*"
+tokio-ircmsg = { path = "../../tokio-ircmsg" }
+tokio-openssl = "0.2"
+tokio-timer = "0.1"
+toml = "0.4"
+tower-grpc = { git = "https://github.com/tower-rs/tower-grpc" }
+tower-h2 = { git = "https://github.com/tower-rs/tower-h2" }
+uuid = { version = "0.6", features = ["v4", "serde", "const_fn"] }
+
+[build-dependencies]
+tower-grpc-build = { "git" = "https://github.com/tower-rs/tower-grpc" }
+
+[package.metadata.yscloud]
+package_id = "org.yasashiisyndicate.ircc-daemon"
+
+[package.metadata.yscloud.dependencies]
+"org.yasashiisyndicate.acme-sidecar" = { "version" = "1.0" }

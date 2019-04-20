@@ -1,0 +1,217 @@
+use std::fs::File;
+use std::borrow::Cow;
+use std::collections::{BTreeMap, HashMap};
+
+use semver::{Version, VersionReq};
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
+
+pub mod permissions;
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct DeploymentManifest {
+    pub deployment_name: String,
+    pub public_services: Vec<DeployedPublicService>,
+    pub components: Vec<DeployedApplicationManifest>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "snake_case")]
+pub struct DeployedApplicationManifest {
+    pub package_id: String,
+    pub version: Version,
+    pub provided_local_services: Vec<String>,
+    pub provided_remote_services: Vec<String>,
+    pub required_remote_services: Vec<String>,
+    pub required_local_services: Vec<ServiceId>,
+    pub permissions: Vec<Permission>,
+    pub extras: serde_json::Map<String, serde_json::Value>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "snake_case")]
+pub struct DeployedPublicService {
+    pub service_id: ServiceId,
+    pub binder: PublicServiceBinder,
+}
+
+#[derive(Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash, Clone, Debug)]
+#[serde(rename_all = "snake_case")]
+pub struct ServiceId {
+    pub package_id: String,
+    pub service_name: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "snake_case")]
+pub struct PublicService {
+    pub service_name: String,
+    pub binder: PublicServiceBinder,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "snake_case")]
+pub enum PublicServiceBinder {
+    NativePortBinder(NativePortBinder),
+    WebServiceBinder(WebServiceBinder),
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "snake_case")]
+pub struct NativePortBinder {
+    pub bind_address: String,
+    pub port: u16,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "snake_case")]
+pub struct WebServiceBinder {
+    pub hostname: String,
+}
+
+#[derive(Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash, Clone, Debug)]
+pub struct Permission(Cow<'static, str>);
+
+#[derive(Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash, Clone, Debug)]
+#[serde(rename_all = "snake_case")]
+pub struct ServiceConnection {
+    pub providing_instance_id: Uuid,
+    pub consuming_instance_id: Uuid,
+    pub service_name: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "snake_case")]
+pub struct AppListenPort {
+    pub service_name: String,
+    pub bind_address: AppPortBindAddress,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "snake_case")]
+pub enum AppPortBindAddress {
+    NativePort(AppPortNativePort),
+    // The service will be assign a random port number which will be
+    // discoverable via mDNS.
+    MulticastDnsService(MulticastDnsService),
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "snake_case")]
+pub struct AppPortNativePort {
+    pub address: String,
+    pub port: u16,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "snake_case")]
+pub struct MulticastDnsService {
+    // like `_yshi_ircc._tcp`, I guess?
+    pub service_name: String,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct AppConfiguration {
+    pub package_id: String,
+    pub instance_id: Uuid,
+    pub version: String,
+    pub files: Vec<FileDescriptorInfo>,
+    pub extras: serde_json::Map<String, serde_json::Value>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct FileDescriptorInfo {
+    pub file_num: i32,
+    pub direction: ServiceFileDirection,
+    pub service_name: String,
+    pub remote: FileDescriptorRemote,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "snake_case")]
+pub enum FileDescriptorRemote {
+    SideCarService(SideCarServiceInfo),
+    Socket(SocketInfo),
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "snake_case")]
+pub struct SideCarServiceInfo {
+    pub instance_id: Uuid,
+    pub package_id: String,
+    pub version: Version,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "snake_case")]
+pub struct SocketInfo {
+    pub mode: SocketMode,
+    pub protocol: Protocol,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "snake_case")]
+pub enum SocketMode {
+    Listening,
+    Connected,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "snake_case")]
+pub enum Protocol {
+    Stream,
+    Datagram,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "snake_case")]
+struct ApplicationDependency {
+    pub package_id: String,
+    pub version_req: VersionReq,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "snake_case")]
+struct ApplicationBinary {
+    pub binary_sha: String,
+    pub release_filename: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "snake_case")]
+struct ApplicationRegistryEntry {
+    pub package_id: String,
+    pub version: Version,
+    pub binaries: HashMap<String, ApplicationBinary>,
+    pub manifest_filename: String,
+    pub manifest_sha: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "snake_case")]
+pub struct ApplicationManifest {
+    pub package_id: String,
+    pub version: Version,
+    pub provided_local_services: Vec<String>,
+    pub provided_remote_services: Vec<String>,
+    pub required_remote_services: Vec<String>,
+    pub required_local_services: Vec<String>,
+    pub permissions: Vec<Permission>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "snake_case")]
+pub enum ServiceFileDirection {
+    Serving,
+    Consuming,
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn it_works() {
+        assert_eq!(2 + 2, 4);
+    }
+}

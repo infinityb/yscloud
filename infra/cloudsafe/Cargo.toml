@@ -1,0 +1,8 @@
+[package]
+name = "cloudsafe"
+version = "0.1.0"
+authors = ["Stacey Ell <stacey.ell@gmail.com>"]
+edition = "2018"
+
+[dependencies]
+ip_network = "0.3"
