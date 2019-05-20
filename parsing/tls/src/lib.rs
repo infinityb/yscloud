@@ -420,11 +420,6 @@ pub fn extract_record<'de>(data: &mut slice::Iter<'de, u8>) -> Result<Option<Rec
 
 const TLS_EXTENSION_SERVER_NAME: u16 = 0x0000;
 
-enum MaybeCopied<'arena, 'buffer, T> {
-    Copied(&'arena T),
-    Buffer(&'buffer T),
-}
-
 #[derive(Debug, Copy, Clone)]
 pub struct ExtensionServerNameEntry<'arena>(pub &'arena str);
 
@@ -494,7 +489,7 @@ impl<'arena> ByteIterRead<'arena> for ExtensionServerName<'arena> {
 }
 
 #[derive(Debug, Copy, Clone)]
-pub enum Extension<'arena, 'de> {
+pub enum Extension<'arena> {
     ServerName(&'arena ExtensionServerName<'arena>),
     Unknown(u16, &'arena [u8]),
 }

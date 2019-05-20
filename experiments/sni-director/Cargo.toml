@@ -5,9 +5,11 @@ authors = ["Stacey Ell <stacey.ell@gmail.com>"]
 edition = "2018"
 
 [dependencies]
+bytes = "0.4.12"
 copy_arena = "0.1"
+env_logger = "0.6.1"
+log = "0.4"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 tls = { path = "../../parsing/tls" }
 tokio = { version = "0.1.20" }
-bytes = "0.4.12"
-log = "0.4"
-env_logger = "0.6.1"
