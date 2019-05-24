@@ -1,0 +1,26 @@
+[package]
+authors = ["Dylan MacKenzie <ecstaticmorse@gmail.com>"]
+name = "ksuid"
+version = "0.1.0"
+description = "A library for efficiently generating, parsing and serializing Segment.io KSUIDs"
+repository = "https://github.com/ecstatic-morse/ksuid.git"
+readme = "README.md"
+keywords = ["uuid", "ksuid", "guid"]
+license = "MIT"
+
+[dependencies]
+byteorder = "1.0.0"
+rand = "0.3.15"
+resize-slice = "0.1.2"
+time = "0.1.37"
+
+[dev-dependencies]
+num = "0.1.39"
+
+[features]
+# Set on nightly to enable benchmarks
+# We use this instead of a benches/ directory so we can benchmark internal functions
+bench = []
+
+[workspace]
+members = ["cli"]
