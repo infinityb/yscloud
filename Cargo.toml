@@ -6,7 +6,7 @@ members = [
 	"experiments/linkerclient",
 	"experiments/rbpf",
 	"experiments/rbpf-disassemble",
-	"experiments/sni-director",
+	"experiments/sni-multiplexor",
 	"experiments/sockets",
 	"infra/cloudsafe",
 	"infra/memfd",
