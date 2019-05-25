@@ -5,7 +5,8 @@ use std::error::Error as StdError;
 use std::fs::File;
 use std::io;
 use std::net::{IpAddr, SocketAddr, SocketAddrV4, SocketAddrV6};
-use std::os::unix::io::{AsRawFd, IntoRawFd, RawFd};
+use std::os::unix::io::{FromRawFd, AsRawFd};
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
@@ -15,27 +16,31 @@ use env_logger::Builder;
 use log::{debug, error, info, log, trace, warn, LevelFilter};
 use nix::sys::signal::{kill, Signal};
 use nix::sys::socket::{
-    bind, socket as nix_socket, socketpair as nix_socketpair, AddressFamily, InetAddr, SockAddr,
-    SockFlag, SockProtocol, SockType,
+    setsockopt, sockopt::ReusePort,
+    bind, socket as nix_socket, AddressFamily, InetAddr, SockAddr,
+    SockFlag, SockProtocol, SockType, UnixAddr,
 };
-use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
-use nix::unistd::Pid;
+use nix::sys::stat::{fchmodat, FchmodatFlags, Mode};
+use nix::sys::wait::{waitpid, WaitStatus};
+use nix::unistd::{unlink, Pid};
 
-use registry_model::{
+use sockets::{OwnedFd, socketpair_raw};
+use yscloud_config_model::{
     permissions, AppConfiguration, ApplicationManifest, DeployedApplicationManifest,
     DeployedPublicService, DeploymentManifest, FileDescriptorInfo, FileDescriptorRemote,
-    NativePortBinder, Protocol, PublicService, PublicServiceBinder, ServiceFileDirection,
-    ServiceId, SideCarServiceInfo, SocketInfo, SocketMode, WebServiceBinder,
+    NativePortBinder, Protocol, PublicService, PublicServiceBinder, Sandbox, ServiceFileDirection,
+    ServiceId, SideCarServiceInfo, SocketInfo, SocketMode, UnixDomainBinder, WebServiceBinder,
 };
 use semver::Version;
 use serde_json::{self, json, json_internal};
 use uuid::Uuid;
 
+
 mod artifact;
 pub mod platform;
 
 pub use self::artifact::find_artifact;
-pub use self::platform::{exec_artifact, ExecExtras, Executable};
+pub use self::platform::{exec_artifact, ExecExtras, ExecExtrasBuilder, Executable};
 
 fn json_assert_object(v: serde_json::Value) -> serde_json::Map<String, serde_json::Value> {
     match v {
@@ -44,6 +49,7 @@ fn json_assert_object(v: serde_json::Value) -> serde_json::Map<String, serde_jso
     }
 }
 
+#[allow(dead_code)]
 fn demo() {
     mvp_deployment().unwrap();
 
@@ -66,7 +72,7 @@ fn demo() {
                 "org.yshi.acmesidecar.v1.AcmeSidecar".into(),
                 "org.yshi.log_target.v1.LogTarget".into(),
             ],
-            permissions: vec![permissions::UNCONSTRAINED],
+            sandbox: Sandbox::Unconfined,
         }],
     );
     registry.insert(
@@ -78,7 +84,7 @@ fn demo() {
             provided_local_services: vec!["org.yshi.log_target.v1.LogTarget".into()],
             required_remote_services: vec!["org.yshi.log-storage.v1.LogReceiver".into()],
             required_local_services: vec![],
-            permissions: vec![permissions::UNCONSTRAINED],
+            sandbox: Sandbox::Unconfined,
         }],
     );
     registry.insert(
@@ -90,7 +96,7 @@ fn demo() {
             provided_local_services: vec!["org.yshi.acmesidecar.v1.AcmeSidecar".into()],
             required_remote_services: vec![],
             required_local_services: vec!["org.yshi.log_target.v1.LogTarget".into()],
-            permissions: vec![permissions::UNCONSTRAINED],
+            sandbox: Sandbox::Unconfined,
         }],
     );
 
@@ -161,7 +167,7 @@ fn demo() {
 
         println!("apps={:#?}", apps);
 
-        let mut components = Vec::<DeployedApplicationManifest>::new();
+        let components = Vec::<DeployedApplicationManifest>::new();
 
         Ok(DeploymentManifest {
             deployment_name: options.deployment_name.clone(),
@@ -221,12 +227,12 @@ fn demo() {
             DeployedApplicationManifest {
                 package_id: "org.yshi.sfshost".into(),
                 version: Version::parse("1.0.55").unwrap(),
-                permissions: vec![
+                sandbox: Sandbox::PermissionSet(vec![
                     // transloading feature.
                     permissions::NETWORK_OUTGOING_TCP,
                     // to persist user media
                     permissions::DISK_APP_LOCAL_STORAGE,
-                ],
+                ]),
                 provided_remote_services: vec![],
                 provided_local_services: vec!["org.yshi.sfshost.https".into()],
                 required_remote_services: vec![],
@@ -252,10 +258,10 @@ fn demo() {
             DeployedApplicationManifest {
                 package_id: "org.yshi.acmehelper".into(),
                 version: Version::parse("1.0.1").unwrap(),
-                permissions: vec![
+                sandbox: Sandbox::PermissionSet(vec![
                     // to persist crypto information
                     permissions::DISK_APP_LOCAL_STORAGE,
-                ],
+                ]),
                 provided_remote_services: vec![],
                 provided_local_services: vec!["org.yshi.tls.certificate-issuer".into()],
                 required_remote_services: vec![],
@@ -268,7 +274,7 @@ fn demo() {
             DeployedApplicationManifest {
                 package_id: "org.yshi.log-aggregator".into(),
                 version: Version::parse("1.0.1").unwrap(),
-                permissions: vec![],
+                sandbox: Sandbox::PermissionSet(vec![]),
                 provided_remote_services: vec![],
                 provided_local_services: vec!["org.yshi.log-aggregator.log-receiver".into()],
                 required_remote_services: vec!["org.yshi.log-storage.log-receiver".into()],
@@ -291,6 +297,8 @@ fn demo() {
 fn main() {
     const CREATE_RELEASE_SUBCOMMAND: &str = "create-release";
     const RUN_SUBCOMMAND: &str = "run";
+    const EXPORT_MANIFEST_SUBCOMMAND: &str = "export-manifest";
+
     const CARGO_PKG_VERSION: &str = env!("CARGO_PKG_VERSION");
     const CARGO_PKG_NAME: &str = env!("CARGO_PKG_NAME");
 
@@ -314,9 +322,29 @@ fn main() {
                 .takes_value(true),
         );
 
+    let export_manifest = SubCommand::with_name(EXPORT_MANIFEST_SUBCOMMAND)
+        .version(CARGO_PKG_VERSION)
+        .about("export a deployment manifest")
+        .arg(
+            Arg::with_name("name")
+                .long("name")
+                .value_name("name")
+                .help("the name of the deployment manifest")
+                .required(true)
+                .takes_value(true),
+        );
+
     let run = SubCommand::with_name(RUN_SUBCOMMAND)
         .version(CARGO_PKG_VERSION)
         .about("link and run a deployment")
+        .arg(
+            Arg::with_name("approot")
+                .long("approot")
+                .value_name("DIR")
+                .help("an application state directory root")
+                .required(true)
+                .takes_value(true),
+        )
         .arg(
             Arg::with_name("manifest")
                 .long("manifest")
@@ -352,6 +380,7 @@ fn main() {
         )
         .subcommand(create_release)
         .subcommand(run)
+        .subcommand(export_manifest)
         .get_matches();
 
     let mut builder = Builder::from_default_env();
@@ -401,52 +430,31 @@ fn main() {
         main_run(matches);
         return;
     }
+    if let Some(matches) = matches.subcommand_matches(EXPORT_MANIFEST_SUBCOMMAND) {
+        main_export_manifest(matches);
+        return;
+    }
 }
 
-fn main_create_release(matches: &clap::ArgMatches) {
-    let binary_path = matches.value_of("binary").unwrap();
-    trace!("got binary: {:?}", binary_path);
-
-    let manifest_path = matches.value_of("manifest").unwrap();
-    trace!("got manifest: {:?}", manifest_path);
-}
-
-fn main_run(matches: &clap::ArgMatches) {
-    let artifacts = matches.value_of("artifacts").unwrap();
-    trace!("got artifacts: {:?}", artifacts);
-
-    let manifest_path = matches.value_of("manifest").unwrap();
-    trace!("got manifest: {:?}", manifest_path);
-
-    let target_deployment_manifest = DeploymentManifest {
+fn sfshost_deployment_manifest() -> DeploymentManifest {
+    DeploymentManifest {
         deployment_name: "sfshost.localhost.yshi.com".into(),
-        public_services: vec![
-            DeployedPublicService {
-                service_id: ServiceId {
-                    package_id: "org.yshi.sfshost".into(),
-                    service_name: "org.yshi.sfshost.https".into(),
-                },
-                binder: PublicServiceBinder::NativePortBinder(NativePortBinder {
-                    bind_address: "::".into(),
-                    port: 1443,
-                }),
+        public_services: vec![DeployedPublicService {
+            service_id: ServiceId {
+                package_id: "org.yshi.sfshost".into(),
+                service_name: "org.yshi.sfshost.https".into(),
             },
-            // DeployedPublicService {
-            //     service_id: ServiceId {
-            //         package_id: "org.yshi.sfshost".into(),
-            //         service_name: "org.yshi.sfshost.http".into(),
-            //     },
-            //     binder: PublicServiceBinder::NativePortBinder(NativePortBinder {
-            //         bind_address: "::".into(),
-            //         port: 1080,
-            //     }),
-            // },
-        ],
+            binder: PublicServiceBinder::NativePortBinder(NativePortBinder {
+                bind_address: "::".into(),
+                port: 1443,
+                start_listen: true,
+            }),
+        }],
         components: vec![
             DeployedApplicationManifest {
                 package_id: "org.yshi.sfshost".into(),
                 version: Version::parse("1.0.55").unwrap(),
-                permissions: vec![permissions::UNCONSTRAINED],
+                sandbox: Sandbox::Unconfined,
                 provided_remote_services: vec!["org.yshi.sfshost.https".into()],
                 provided_local_services: vec![],
                 required_remote_services: vec![],
@@ -476,7 +484,7 @@ fn main_run(matches: &clap::ArgMatches) {
             DeployedApplicationManifest {
                 package_id: "org.yshi.selfsigned-issuer".into(),
                 version: Version::parse("0.1.0").unwrap(),
-                permissions: vec![permissions::UNCONSTRAINED],
+                sandbox: Sandbox::Unconfined,
                 provided_remote_services: vec![],
                 provided_local_services: vec![
                     "org.yshi.certificate_issuer.v1.CertificateIssuer".into()
@@ -491,7 +499,7 @@ fn main_run(matches: &clap::ArgMatches) {
             DeployedApplicationManifest {
                 package_id: "org.yshi.file-logger".into(),
                 version: Version::parse("1.0.1").unwrap(),
-                permissions: vec![permissions::UNCONSTRAINED],
+                sandbox: Sandbox::Unconfined,
                 provided_remote_services: vec![],
                 provided_local_services: vec!["org.yshi.log_target.v1.LogTarget".into()],
                 required_remote_services: vec![],
@@ -499,12 +507,115 @@ fn main_run(matches: &clap::ArgMatches) {
                 extras: Default::default(),
             },
         ],
+    }
+}
+
+fn staticserver_deployment_manifest() -> DeploymentManifest {
+    DeploymentManifest {
+        deployment_name: "staceyell.com".into(),
+        public_services: vec![
+            DeployedPublicService {
+                service_id: ServiceId {
+                    package_id: "org.yshi.staticserver".into(),
+                    service_name: "org.yshi.staticserver.https".into(),
+                },
+                binder: PublicServiceBinder::UnixDomainBinder(UnixDomainBinder {
+                    path: Path::new("/var/run/https.staceyell.com").into(),
+                    start_listen: true,
+                }),
+            },
+            DeployedPublicService {
+                service_id: ServiceId {
+                    package_id: "org.yshi.staticserver".into(),
+                    service_name: "org.yshi.staticserver.http".into(),
+                },
+                binder: PublicServiceBinder::UnixDomainBinder(UnixDomainBinder {
+                    path: Path::new("/var/run/http.staceyell.com").into(),
+                    start_listen: true,
+                }),
+            },
+        ],
+        components: vec![
+            DeployedApplicationManifest {
+                package_id: "org.yshi.staticserver".into(),
+                version: Version::parse("1.0.2").unwrap(),
+                sandbox: Sandbox::UnixUserConfinement(
+                    "staceyell-com-serv".into(),
+                    "staceyell-com-serv".into(),
+                ),
+                provided_remote_services: vec![
+                    "org.yshi.staticserver.http".into(),
+                    "org.yshi.staticserver.https".into(),
+                ],
+                provided_local_services: vec![],
+                required_remote_services: vec![],
+                required_local_services: vec![ServiceId {
+                    package_id: "org.yshi.file-logger".into(),
+                    service_name: "org.yshi.log_target.v1.LogTarget".into(),
+                }],
+                extras: json_assert_object(json!({
+                    "acme_directory": ".",
+                    "allowed_hostnames": [
+                        "www.staceyell.com",
+                        "staceyell.com"
+                    ]
+                })),
+            },
+            DeployedApplicationManifest {
+                package_id: "org.yshi.file-logger".into(),
+                version: Version::parse("1.0.1").unwrap(),
+                sandbox: Sandbox::UnixUserConfinement(
+                    "staceyell-com-log".into(),
+                    "staceyell-com-log".into(),
+                ),
+                provided_remote_services: vec![],
+                provided_local_services: vec!["org.yshi.log_target.v1.LogTarget".into()],
+                required_remote_services: vec![],
+                required_local_services: vec![],
+                extras: Default::default(),
+            },
+        ],
+    }
+}
+
+fn main_export_manifest(matches: &clap::ArgMatches) {
+    const SFSHOST_MANIFEST_NAME: &str = "sfshost";
+    const STATICSERVER_MANIFEST_NAME: &str = "staticserver";
+
+    let target_deployment_manifest = match matches.value_of("name").unwrap() {
+        SFSHOST_MANIFEST_NAME => sfshost_deployment_manifest(),
+        STATICSERVER_MANIFEST_NAME => staticserver_deployment_manifest(),
+        _ => unimplemented!(),
     };
 
     let x = serde_json::to_string_pretty(&target_deployment_manifest).unwrap();
     println!("{}", x);
+}
 
-    let reified = reify_service_connections(&target_deployment_manifest, artifacts).unwrap();
+fn main_create_release(matches: &clap::ArgMatches) {
+    let binary_path = matches.value_of("binary").unwrap();
+    trace!("got binary: {:?}", binary_path);
+
+    let manifest_path = matches.value_of("manifest").unwrap();
+    trace!("got manifest: {:?}", manifest_path);
+}
+
+fn main_run(matches: &clap::ArgMatches) {
+    let approot = matches.value_of("approot").unwrap();
+    let approot = Path::new(approot).to_owned();
+    trace!("got approot: {}", approot.display());
+
+    let artifacts = matches.value_of("artifacts").unwrap();
+    trace!("got artifacts: {:?}", artifacts);
+
+    let manifest_path = matches.value_of("manifest").unwrap();
+    trace!("got manifest: {:?}", manifest_path);
+
+    let rdr = File::open(&manifest_path).unwrap();
+    let target_deployment_manifest = serde_json::from_reader::<_, DeploymentManifest>(rdr).unwrap();
+
+    let reified =
+        reify_service_connections(&target_deployment_manifest, artifacts, &approot).unwrap();
 
     #[derive(Clone)]
     struct ChildInfo {
@@ -513,23 +624,12 @@ fn main_run(matches: &clap::ArgMatches) {
         running: Arc<AtomicBool>,
     }
 
-    let mut extras = ExecExtras::builder();
-
-    #[cfg(target_os = "linux")]
-    {
-        extras.set_user("nobody").unwrap();
-        extras.set_group("nogroup").unwrap();
-    }
-
-    let extras = extras.build();
-
     let mut pids = HashMap::<Pid, ChildInfo>::new();
     for a in reified {
-        let package_id = a.package_id.clone();
-        let child = exec_artifact(&extras, a).unwrap();
+        let package_id = a.cfg.package_id.clone();
+        let child = exec_artifact(&a.extras, a.cfg).unwrap();
 
         debug!("made child: {} {:?}", package_id, child);
-
         pids.insert(
             child,
             ChildInfo {
@@ -614,38 +714,6 @@ pub struct AppPreforkConfiguration {
     extras: serde_json::Map<String, serde_json::Value>,
 }
 
-pub struct OwnedFd(RawFd);
-
-impl AsRawFd for OwnedFd {
-    fn as_raw_fd(&self) -> RawFd {
-        self.0
-    }
-}
-
-impl Drop for OwnedFd {
-    fn drop(&mut self) {
-        let _ = nix::unistd::close(self.0);
-    }
-}
-
-impl From<File> for OwnedFd {
-    fn from(fd: File) -> OwnedFd {
-        OwnedFd(fd.into_raw_fd())
-    }
-}
-
-pub fn socketpair() -> io::Result<(OwnedFd, OwnedFd)> {
-    let (left, right) = nix_socketpair(
-        AddressFamily::Unix,
-        SockType::Stream,
-        None,
-        SockFlag::empty(),
-    )
-    .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
-
-    Ok((OwnedFd(left), OwnedFd(right)))
-}
-
 pub struct ServiceFileDescriptor {
     file: OwnedFd,
     direction: ServiceFileDirection,
@@ -654,28 +722,73 @@ pub struct ServiceFileDescriptor {
 }
 
 fn bind_tcp_socket(np: &NativePortBinder) -> io::Result<OwnedFd> {
-    let fd = nix_socket(
+    let fd: OwnedFd = nix_socket(
         AddressFamily::Inet6,
         SockType::Stream,
         SockFlag::empty(),
         SockProtocol::Tcp,
     )
-    .map(OwnedFd)
-    .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+    .map(|f| unsafe { FromRawFd::from_raw_fd(f) })
+    .map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
 
     let ip_addr = np
         .bind_address
         .parse()
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        .map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
     let saddr = match ip_addr {
         IpAddr::V4(a) => SocketAddr::V4(SocketAddrV4::new(a, np.port)),
         IpAddr::V6(a) => SocketAddr::V6(SocketAddrV6::new(a, np.port, 0, 0)),
     };
 
-    bind(fd.0, &SockAddr::Inet(InetAddr::from_std(&saddr)))
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+    setsockopt(fd.as_raw_fd(), ReusePort, &true)
+        .map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
 
-    ::nix::sys::socket::listen(fd.0, 10).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+    bind(fd.as_raw_fd(), &SockAddr::Inet(InetAddr::from_std(&saddr)))
+        .map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
+
+    if np.start_listen {
+        // 128 from rust stdlib
+        ::nix::sys::socket::listen(fd.as_raw_fd(), 128)
+            .map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
+    }
+
+    Ok(fd)
+}
+
+fn bind_unix_socket(ub: &UnixDomainBinder) -> io::Result<OwnedFd> {
+    let fd: OwnedFd = nix_socket(
+        AddressFamily::Unix,
+        SockType::Stream,
+        SockFlag::empty(),
+        None,
+    )
+    .map(|f| unsafe { FromRawFd::from_raw_fd(f) })
+    .map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
+
+    let addr = UnixAddr::new(&ub.path).unwrap();
+    if let Err(err) = bind(fd.as_raw_fd(), &SockAddr::Unix(addr)) {
+        if err == nix::Error::Sys(nix::errno::Errno::EADDRINUSE) {
+            unlink(&ub.path).map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
+        }
+        bind(fd.as_raw_fd(), &SockAddr::Unix(addr))
+            .map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
+    }
+
+    if ub.start_listen {
+        ::nix::sys::socket::listen(fd.as_raw_fd(), 10)
+            .map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
+    }
+
+    fchmodat(
+        None,
+        &ub.path,
+        Mode::S_IRWXU | Mode::S_IRWXG | Mode::S_IRWXO,
+        FchmodatFlags::FollowSymlink,
+    )
+    .map_err(|e| {
+        let msg = format!("fchmodat of {}: {}", ub.path.display(), e);
+        io::Error::new(io::ErrorKind::Other, msg)
+    })?;
 
     Ok(fd)
 }
@@ -683,17 +796,24 @@ fn bind_tcp_socket(np: &NativePortBinder) -> io::Result<OwnedFd> {
 fn bind_service(binder: &PublicServiceBinder) -> io::Result<OwnedFd> {
     match *binder {
         PublicServiceBinder::NativePortBinder(ref np) => bind_tcp_socket(np),
+        PublicServiceBinder::UnixDomainBinder(ref ub) => bind_unix_socket(ub),
         PublicServiceBinder::WebServiceBinder(ref _ws) => {
             Err(io::Error::new(io::ErrorKind::Other, "unimplemented"))
         }
     }
 }
 
+struct ExecSomething {
+    extras: ExecExtras,
+    cfg: AppPreforkConfiguration,
+}
+
 fn reify_service_connections(
     dm: &DeploymentManifest,
     artifact_path: &str,
-) -> Result<Vec<AppPreforkConfiguration>, Box<StdError>> {
-    let mut instances = HashMap::<Uuid, AppPreforkConfiguration>::new();
+    approot: &Path,
+) -> Result<Vec<ExecSomething>, Box<StdError>> {
+    let mut instances = HashMap::<Uuid, ExecSomething>::new();
     let mut instance_components = HashMap::<Uuid, &DeployedApplicationManifest>::new();
     let mut instance_by_package = HashMap::<&str, Uuid>::new();
 
@@ -702,15 +822,30 @@ fn reify_service_connections(
 
         let instance_id = Uuid::new_v4();
 
+        let mut builder = ExecExtras::builder();
+
+        let mut workdir = approot.to_owned();
+        workdir.push(&dm.deployment_name);
+        workdir.push(&component.package_id);
+        builder.set_workdir(&workdir).unwrap();
+
+        if let Sandbox::UnixUserConfinement(ref user, ref group) = component.sandbox {
+            builder.set_user(user).unwrap();
+            builder.set_group(group).unwrap();
+        }
+
         instances.insert(
             instance_id,
-            AppPreforkConfiguration {
-                package_id: component.package_id.clone(),
-                artifact,
-                version: format!("{}", component.version),
-                instance_id,
-                files: Default::default(),
-                extras: component.extras.clone(),
+            ExecSomething {
+                extras: builder.build(),
+                cfg: AppPreforkConfiguration {
+                    package_id: component.package_id.clone(),
+                    artifact,
+                    version: format!("{}", component.version),
+                    instance_id,
+                    files: Default::default(),
+                    extras: component.extras.clone(),
+                },
             },
         );
         instance_components.insert(instance_id, component);
@@ -738,12 +873,12 @@ fn reify_service_connections(
         let service_sock = bind_service(&ps.binder)?;
         info!(
             "binded public service {} to {:?} - fd = {}",
-            ps.service_id.service_name, ps.binder, service_sock.0,
+            ps.service_id.service_name, ps.binder, service_sock.as_raw_fd(),
         );
 
-        instance.files.push(ServiceFileDescriptor {
+        instance.cfg.files.push(ServiceFileDescriptor {
             file: service_sock,
-            direction: ServiceFileDirection::Serving,
+            direction: ServiceFileDirection::ServingListening,
             service_name: ps.service_id.service_name.clone(),
             remote: FileDescriptorRemote::Socket(SocketInfo {
                 mode: SocketMode::Listening,
@@ -762,14 +897,14 @@ fn reify_service_connections(
                 format!("internal error: unknown instance {:?}", remote_instance_id)
             })?;
 
-            let (local_sock, remote_sock) = socketpair()?;
+            let (local_sock, remote_sock) = socketpair_raw()?;
 
             {
                 let local_instance = instances.get_mut(local_instance_id).ok_or_else(|| {
                     format!("internal error: unknown instance {:?}", local_instance_id)
                 })?;
 
-                local_instance.files.push(ServiceFileDescriptor {
+                local_instance.cfg.files.push(ServiceFileDescriptor {
                     file: local_sock,
                     direction: ServiceFileDirection::Consuming,
                     service_name: ls.service_name.clone(),
@@ -786,9 +921,9 @@ fn reify_service_connections(
                     format!("internal error: unknown instance {:?}", remote_instance_id)
                 })?;
 
-                remote_instance.files.push(ServiceFileDescriptor {
+                remote_instance.cfg.files.push(ServiceFileDescriptor {
                     file: remote_sock,
-                    direction: ServiceFileDirection::Serving,
+                    direction: ServiceFileDirection::ServingConnected,
                     service_name: ls.service_name.clone(),
                     remote: FileDescriptorRemote::SideCarService(SideCarServiceInfo {
                         instance_id: *local_instance_id,
@@ -803,8 +938,9 @@ fn reify_service_connections(
     Ok(instances.into_iter().map(|(_, v)| v).collect())
 }
 
+#[allow(dead_code)]
 fn mvp_deployment() -> Result<(), Box<StdError>> {
-    let mut mvp_deployment_manifest = DeploymentManifest {
+    let mvp_deployment_manifest = DeploymentManifest {
         deployment_name: "aibi.yshi.org".into(),
         public_services: vec![
             DeployedPublicService {
@@ -815,6 +951,7 @@ fn mvp_deployment() -> Result<(), Box<StdError>> {
                 binder: PublicServiceBinder::NativePortBinder(NativePortBinder {
                     bind_address: "::".into(),
                     port: 443,
+                    start_listen: true,
                 }),
             },
             DeployedPublicService {
@@ -825,17 +962,16 @@ fn mvp_deployment() -> Result<(), Box<StdError>> {
                 binder: PublicServiceBinder::NativePortBinder(NativePortBinder {
                     bind_address: "::".into(),
                     port: 80,
+                    start_listen: true,
                 }),
             },
         ],
         components: vec![DeployedApplicationManifest {
             package_id: "org.yshi.sfshost".into(),
             version: Version::parse("1.0.55").unwrap(),
-            permissions: vec![
-                // we don't have permission support yet, so we must allow
-                // unconstrained access to the system.
-                permissions::UNCONSTRAINED,
-            ],
+            // we don't have permission support yet, so we must allow
+            // unconfined access to the system.
+            sandbox: Sandbox::Unconfined,
             provided_local_services: vec![
                 "org.yshi.sfshost.http".into(),
                 "org.yshi.sfshost.https".into(),

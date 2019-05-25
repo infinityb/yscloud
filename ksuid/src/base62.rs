@@ -12,6 +12,7 @@
 //! purpose use, callers should use `conversion_len_bound()` to calculate the required output
 //! buffer length.
 
+use std::fmt;
 use std::io;
 
 use resize_slice::ResizeSlice;
@@ -115,6 +116,35 @@ pub fn decode_raw(input: &mut [u8], output: &mut [u8]) -> io::Result<()> {
     change_base(input, output, 62, 256);
     Ok(())
 }
+
+/// Formats a Ksuid using Base62, without intermediate allocations.
+///
+/// see [crate::Ksuid::fmt_base62]
+///
+pub struct FmtBase62<'a> {
+    ksuid: &'a super::Ksuid,
+}
+
+impl<'a> FmtBase62<'a> {
+    pub(crate) fn new(ksuid: &'a super::Ksuid) -> FmtBase62 {
+        FmtBase62 { ksuid }
+    }
+}
+
+impl<'a> fmt::Display for FmtBase62<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        use std::fmt::Write;
+
+        let mut in_scratch = self.ksuid.0;
+        let mut out_scratch = [0; super::BASE62_LEN];
+        change_base(&mut in_scratch, &mut out_scratch, 256, 62);
+        for b in out_scratch.iter_mut() {
+            f.write_char(CHAR_MAP[usize::from(*b)] as char)?;
+        }
+        Ok(())
+    }
+}
+
 
 #[cfg(test)]
 mod tests {

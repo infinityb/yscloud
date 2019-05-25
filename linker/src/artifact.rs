@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use log::{debug, log};
 use semver::Version;
 
-use super::platform::{self, exec_artifact, Executable};
+use super::platform::{self, Executable};
 
 pub fn find_artifact(base: &str, package_id: &str, version: &Version) -> io::Result<Executable> {
     for p in platform::PLATFORM_TRIPLES {

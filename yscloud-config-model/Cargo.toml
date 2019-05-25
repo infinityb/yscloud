@@ -1,5 +1,5 @@
 [package]
-name = "registry-model"
+name = "yscloud-config-model"
 version = "0.1.0"
 authors = ["Stacey Ell <stacey.ell@gmail.com>"]
 edition = "2018"

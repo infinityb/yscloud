@@ -9,10 +9,8 @@ use tokio::net::tcp::{self, TcpStream};
 use tokio::net::unix::{self, UnixStream};
 use tokio::prelude::{Async, Future, Poll};
 
-use crate::sni::ALERT_UNRECOGNIZED_NAME;
+use crate::sni::{SocketAddrPair, ALERT_UNRECOGNIZED_NAME};
 
-/// Future returned by `Dail::dial` which will resolve to a
-/// `NetworkStream` when the stream is connected.
 #[derive(Debug)]
 pub struct ConnectFuture {
     inner: State,
@@ -34,20 +32,25 @@ impl AsyncReadWrite for TcpStream {}
 
 type NetworkStream = Box<dyn AsyncReadWrite + Send + Sync>;
 
+//
+
 impl Future for ConnectFuture {
-    type Item = NetworkStream;
+    type Item = (Option<SocketAddrPair>, NetworkStream);
     type Error = io::Error;
 
-    fn poll(&mut self) -> Poll<NetworkStream, io::Error> {
+    fn poll(&mut self) -> Poll<Self::Item, io::Error> {
         use std::mem;
 
         match self.inner {
             State::Tcp(ref mut fut) => match fut.poll()? {
-                Async::Ready(x) => Ok(Async::Ready(Box::new(x))),
+                Async::Ready(x) => {
+                    let addresses = SocketAddrPair::from_pair(x.local_addr()?, x.peer_addr()?)?;
+                    Ok(Async::Ready((Some(addresses), Box::new(x))))
+                }
                 Async::NotReady => Ok(Async::NotReady),
             },
             State::Unix(ref mut fut) => match fut.poll()? {
-                Async::Ready(x) => Ok(Async::Ready(Box::new(x))),
+                Async::Ready(x) => Ok(Async::Ready((None, Box::new(x)))),
                 Async::NotReady => Ok(Async::NotReady),
             },
             State::Error(_) => {

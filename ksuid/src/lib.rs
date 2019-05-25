@@ -21,6 +21,8 @@ extern crate time;
 
 mod base62;
 
+pub use self::base62::FmtBase62;
+
 use std::io;
 use std::ascii::AsciiExt;
 
@@ -59,7 +61,7 @@ fn hex_digit(c: u8) -> io::Result<u8> {
 /// [`EPOCH`](constant.EPOCH.html).
 ///
 /// The remaining 16 bytes is the randomly generated payload.
-#[derive(Clone, Copy, Ord, PartialOrd, Eq, PartialEq)]
+#[derive(Clone, Copy, Ord, PartialOrd, Eq, PartialEq, Hash)]
 pub struct Ksuid([u8; LEN]);
 
 impl Ksuid {
@@ -175,6 +177,18 @@ impl Ksuid {
         unsafe { String::from_utf8_unchecked(out) }
     }
 
+    /// Format a Base62-encoded version of this identifier without allocation.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let id = ksuid::Ksuid::new(::std::u32::MAX, [255; 16]);
+    /// assert_eq!(&format!("{}", id.fmt_base62()), "aWgEPTl1tmebfsQzFP4bxwgy80V");
+    /// ```
+    pub fn fmt_base62(&self) -> FmtBase62 {
+        FmtBase62::new(self)
+    }
+
     /// The hex-encoded version of this identifier.
     pub fn to_hex(&self) -> String {
         let mut ret = Vec::with_capacity(HEX_LEN);
@@ -254,7 +268,21 @@ mod tests {
         let ksuid = Ksuid::from_bytes(&[255; LEN]).unwrap();
 
         b.iter(|| {
-            ksuid.to_base62()
+            ksuid.to_base62();
+        })
+    }
+
+    #[bench]
+    fn bench_to_fmt_base62(b: &mut test::Bencher) {
+        use std::io::Write;
+
+        let ksuid = Ksuid::from_bytes(&[255; LEN]).unwrap();
+        let mut scratch = [0; BASE62_LEN];
+        let mut cur = io::Cursor::new(&mut scratch[..]);
+
+        b.iter(|| {
+            cur.set_position(0);
+            write!(&mut cur, "{}", ksuid.fmt_base62()).unwrap();
         })
     }
 

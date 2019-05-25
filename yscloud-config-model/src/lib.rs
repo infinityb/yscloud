@@ -1,6 +1,6 @@
-use std::fs::File;
+use std::path::PathBuf;
 use std::borrow::Cow;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 
 use semver::{Version, VersionReq};
 use serde::{Deserialize, Serialize};
@@ -25,8 +25,16 @@ pub struct DeployedApplicationManifest {
     pub provided_remote_services: Vec<String>,
     pub required_remote_services: Vec<String>,
     pub required_local_services: Vec<ServiceId>,
-    pub permissions: Vec<Permission>,
+    pub sandbox: Sandbox,
     pub extras: serde_json::Map<String, serde_json::Value>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "snake_case")]
+pub enum Sandbox {
+    Unconfined,
+    UnixUserConfinement(String, String),
+    PermissionSet(Vec<Permission>),
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -53,8 +61,19 @@ pub struct PublicService {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "snake_case")]
 pub enum PublicServiceBinder {
+    UnixDomainBinder(UnixDomainBinder),
     NativePortBinder(NativePortBinder),
     WebServiceBinder(WebServiceBinder),
+    // #[cfg(feature = "sni-binder")]
+    // SniServiceBinder(SniServiceBinder),
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "snake_case")]
+pub struct UnixDomainBinder {
+    pub path: PathBuf,
+    #[serde(default="start_listen_default")]
+    pub start_listen: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -62,6 +81,19 @@ pub enum PublicServiceBinder {
 pub struct NativePortBinder {
     pub bind_address: String,
     pub port: u16,
+    #[serde(default="start_listen_default")]
+    pub start_listen: bool,
+}
+
+// #[cfg(feature = "sni-binder")]
+// #[derive(Serialize, Deserialize, Clone, Debug)]
+// #[serde(rename_all = "snake_case")]
+// pub struct SniServiceBinder {
+//     pub sni_hostnames: Vec<String>,
+// }
+
+fn start_listen_default() -> bool {
+    true
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -111,7 +143,7 @@ pub struct MulticastDnsService {
     pub service_name: String,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 #[serde(rename_all = "snake_case")]
 pub struct AppConfiguration {
     pub package_id: String,
@@ -121,7 +153,7 @@ pub struct AppConfiguration {
     pub extras: serde_json::Map<String, serde_json::Value>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct FileDescriptorInfo {
     pub file_num: i32,
     pub direction: ServiceFileDirection,
@@ -198,20 +230,13 @@ pub struct ApplicationManifest {
     pub provided_remote_services: Vec<String>,
     pub required_remote_services: Vec<String>,
     pub required_local_services: Vec<String>,
-    pub permissions: Vec<Permission>,
+    pub sandbox: Sandbox,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
-#[serde(rename_all = "snake_case")]
+#[derive(Serialize, Deserialize, Clone, Debug, Eq, PartialEq)]
+#[serde(rename_all = "kebab-case")]
 pub enum ServiceFileDirection {
-    Serving,
+    ServingListening,
+    ServingConnected,
     Consuming,
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn it_works() {
-        assert_eq!(2 + 2, 4);
-    }
 }

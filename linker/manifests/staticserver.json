@@ -1,0 +1,68 @@
+{
+  "deployment_name": "staticserver.localhost.yshi.com",
+  "public_services": [
+    {
+      "service_id": {
+        "package_id": "org.yshi.staticserver",
+        "service_name": "org.yshi.staticserver.https"
+      },
+      "binder": {
+        "unix_domain_binder": {
+          "path": "/tmp/org.yshi.staticserver.https"
+        }
+      }
+    },
+    {
+      "service_id": {
+        "package_id": "org.yshi.staticserver",
+        "service_name": "org.yshi.staticserver.http"
+      },
+      "binder": {
+        "unix_domain_binder": {
+          "path": "/tmp/org.yshi.staticserver.http"
+        }
+      }
+    }
+  ],
+  "components": [
+    {
+      "package_id": "org.yshi.staticserver",
+      "version": "1.0.0",
+      "provided_local_services": [],
+      "provided_remote_services": [
+        "org.yshi.staticserver.http",
+        "org.yshi.staticserver.https"
+      ],
+      "required_remote_services": [],
+      "required_local_services": [
+        {
+          "package_id": "org.yshi.file-logger",
+          "service_name": "org.yshi.log_target.v1.LogTarget"
+        }
+      ],
+      "permissions": [
+        "org.yshi.permissions.unconstrained"
+      ],
+      "extras": {
+        "acme_directory": ".",
+        "allowed_hostnames": [
+          "www.staceyell.com"
+        ]
+      }
+    },
+    {
+      "package_id": "org.yshi.file-logger",
+      "version": "1.0.1",
+      "provided_local_services": [
+        "org.yshi.log_target.v1.LogTarget"
+      ],
+      "provided_remote_services": [],
+      "required_remote_services": [],
+      "required_local_services": [],
+      "permissions": [
+        "org.yshi.permissions.unconstrained"
+      ],
+      "extras": {}
+    }
+  ]
+}

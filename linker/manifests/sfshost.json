@@ -1,0 +1,86 @@
+{
+  "deployment_name": "sfshost.localhost.yshi.com",
+  "public_services": [
+    {
+      "service_id": {
+        "package_id": "org.yshi.sfshost",
+        "service_name": "org.yshi.sfshost.https"
+      },
+      "binder": {
+        "native_port_binder": {
+          "bind_address": "::",
+          "port": 1443
+        }
+      }
+    }
+  ],
+  "components": [
+    {
+      "package_id": "org.yshi.sfshost",
+      "version": "1.0.55",
+      "provided_local_services": [],
+      "provided_remote_services": [
+        "org.yshi.sfshost.https"
+      ],
+      "required_remote_services": [],
+      "required_local_services": [
+        {
+          "package_id": "org.yshi.file-logger",
+          "service_name": "org.yshi.log_target.v1.LogTarget"
+        },
+        {
+          "package_id": "org.yshi.selfsigned-issuer",
+          "service_name": "org.yshi.certificate_issuer.v1.CertificateIssuer"
+        }
+      ],
+      "permissions": [
+        "org.yshi.permissions.unconstrained"
+      ],
+      "extras": {
+        "vhosts": {
+          "localhost": {
+            "directory": "./test",
+            "password": "foobar"
+          },
+          "localhost:1443": {
+            "directory": "./test",
+            "password": "foobar"
+          }
+        }
+      }
+    },
+    {
+      "package_id": "org.yshi.selfsigned-issuer",
+      "version": "0.1.0",
+      "provided_local_services": [
+        "org.yshi.certificate_issuer.v1.CertificateIssuer"
+      ],
+      "provided_remote_services": [],
+      "required_remote_services": [],
+      "required_local_services": [
+        {
+          "package_id": "org.yshi.file-logger",
+          "service_name": "org.yshi.log_target.v1.LogTarget"
+        }
+      ],
+      "permissions": [
+        "org.yshi.permissions.unconstrained"
+      ],
+      "extras": {}
+    },
+    {
+      "package_id": "org.yshi.file-logger",
+      "version": "1.0.1",
+      "provided_local_services": [
+        "org.yshi.log_target.v1.LogTarget"
+      ],
+      "provided_remote_services": [],
+      "required_remote_services": [],
+      "required_local_services": [],
+      "permissions": [
+        "org.yshi.permissions.unconstrained"
+      ],
+      "extras": {}
+    }
+  ]
+}

@@ -1,15 +1,25 @@
 [package]
 name = "sni-director"
-version = "0.1.0"
+version = "0.1.2"
 authors = ["Stacey Ell <stacey.ell@gmail.com>"]
 edition = "2018"
 
 [dependencies]
 bytes = "0.4.12"
+clap = "*"
 copy_arena = "0.1"
 env_logger = "0.6.1"
+ksuid = { path = "../../ksuid" }
 log = "0.4"
+nix = "0.13"
+prost = "0.5.0"
+prost-types = "0.5.0"
+yscloud-config-model = { path = "../../yscloud-config-model" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tls = { path = "../../parsing/tls" }
 tokio = { version = "0.1.20" }
+uuid = { version = "0.6", features = ["v4", "serde", "const_fn"] }
+
+[build-dependencies]
+tower-grpc-build = { "git" = "https://github.com/tower-rs/tower-grpc" }

@@ -21,6 +21,3 @@ num = "0.1.39"
 # Set on nightly to enable benchmarks
 # We use this instead of a benches/ directory so we can benchmark internal functions
 bench = []
-
-[workspace]
-members = ["cli"]

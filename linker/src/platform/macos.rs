@@ -1,4 +1,3 @@
-use crate::OwnedFd;
 use std::ffi::CString;
 use std::fmt;
 use std::io;
@@ -64,7 +63,7 @@ fn execute_child(e: &ExecConfig) -> io::Result<!> {
 }
 
 pub struct ExecExtras {
-    fields: (),
+    _fields: (),
 }
 
 impl ExecExtras {
@@ -75,12 +74,24 @@ impl ExecExtras {
 
 #[derive(Default)]
 pub struct ExecExtrasBuilder {
-    fields: (),
+    _fields: (),
 }
 
 impl ExecExtrasBuilder {
+    pub fn set_user(&mut self, _name: &str) -> io::Result<()> {
+        Ok(())
+    }
+
+    pub fn set_group(&mut self, _name: &str) -> io::Result<()> {
+        Ok(())
+    }
+
+    pub fn set_workdir(&mut self, _: &Path) -> io::Result<()> {
+        Ok(())
+    }
+
     pub fn build(&self) -> ExecExtras {
-        ExecExtras { fields: () }
+        ExecExtras { _fields: () }
     }
 }
 
@@ -88,7 +99,7 @@ impl ExecExtrasBuilder {
 // let path_bytes = OsStrExt::as_bytes(artifact_path.as_os_str());
 // let artifact_path = CString::new(path_bytes).expect("valid c-string");
 
-fn exec_artifact_child(e: &ExecExtras, c: AppPreforkConfiguration) -> io::Result<!> {
+fn exec_artifact_child(_e: &ExecExtras, c: AppPreforkConfiguration) -> io::Result<!> {
     use nix::fcntl::open;
     use nix::fcntl::OFlag;
     use nix::sys::stat::Mode;

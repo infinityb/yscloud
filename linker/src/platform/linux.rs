@@ -1,8 +1,10 @@
+use std::error::Error as StdError;
 use std::ffi::CString;
 use std::fmt;
 use std::io;
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use log::{info, log, warn};
@@ -69,19 +71,37 @@ pub trait SandboxingStrategy {
     fn preexec(&self) -> io::Result<()>;
 }
 
+impl SandboxingStrategy for () {
+    fn preexec(&self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
 pub struct UserChangeStrategy {
+    workdir: Option<PathBuf>,
     set_user: Option<Uid>,
     set_group: Option<Gid>,
 }
 
+fn io_other<E>(e: E) -> io::Error where E: Into<Box<dyn StdError + Send + Sync>> {
+    io::Error::new(io::ErrorKind::Other, e)
+}
+
 impl SandboxingStrategy for UserChangeStrategy {
     fn preexec(&self) -> io::Result<()> {
-        if let Some(uid) = self.set_user {
-            nix::unistd::setuid(uid).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
-        }
         if let Some(gid) = self.set_group {
-            nix::unistd::setgid(gid).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+            info!("setting gid = {:?}", gid);
+            nix::unistd::setgid(gid).map_err(io_other)?;
         }
+        if let Some(uid) = self.set_user {
+            info!("setting uid = {:?}", uid);
+            nix::unistd::setuid(uid).map_err(io_other)?;
+        }
+        if let Some(ref wd) = self.workdir {
+            info!("setting cwd = {}", wd.display());
+            nix::unistd::chdir(wd).map_err(io_other)?;
+        }
+
         Ok(())
     }
 }
@@ -98,6 +118,7 @@ impl ExecExtras {
 
 #[derive(Default)]
 pub struct ExecExtrasBuilder {
+    workdir: Option<PathBuf>,
     set_user: Option<Uid>,
     set_group: Option<Gid>,
 }
@@ -118,8 +139,13 @@ impl ExecExtrasBuilder {
             let msg = format!("unknown group {}", name);
             io::Error::new(io::ErrorKind::Other, msg)
         })?;
-
+        
         self.set_group = Some(Gid::from_raw(gid.gid()));
+        Ok(())
+    }
+
+    pub fn set_workdir(&mut self, workdir: &Path) -> io::Result<()> {
+        self.workdir = Some(workdir.to_owned());
         Ok(())
     }
 
@@ -128,6 +154,7 @@ impl ExecExtrasBuilder {
 
         if self.set_user.is_some() || self.set_group.is_some() {
             let obj: Box<dyn SandboxingStrategy> = Box::new(UserChangeStrategy {
+                workdir: self.workdir.clone(),
                 set_user: self.set_user.clone(),
                 set_group: self.set_group.clone(),
             });
@@ -141,7 +168,7 @@ impl ExecExtrasBuilder {
     }
 }
 
-fn exec_artifact_child(e: &ExecExtras, c: &AppPreforkConfiguration) -> io::Result<!> {
+fn exec_artifact_child(ext: &ExecExtras, c: &AppPreforkConfiguration) -> io::Result<!> {
     let package_id = c.package_id.clone();
     let app_config = relabel_file_descriptors(&c)?;
     let tmpfile = open(
@@ -149,7 +176,7 @@ fn exec_artifact_child(e: &ExecExtras, c: &AppPreforkConfiguration) -> io::Resul
         OFlag::O_RDWR | OFlag::O_TMPFILE,
         Mode::S_IRUSR | Mode::S_IWUSR,
     )
-    .map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
+    .map_err(io_other)?;
 
     let data = serde_json::to_string(&app_config)?;
     let data_len =
@@ -166,6 +193,9 @@ fn exec_artifact_child(e: &ExecExtras, c: &AppPreforkConfiguration) -> io::Resul
     ];
     info!("running {} {:?} -- {}", package_id, arguments, data);
 
+    if let Some(ref sandbox) = ext.sandboxing_strategy {
+        sandbox.preexec()?;
+    }
     c.artifact.execute(arguments)?;
 
     unreachable!();
