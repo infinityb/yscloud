@@ -6,6 +6,7 @@ use std::os::unix::io::{AsRawFd, RawFd};
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::os::unix::io::FromRawFd;
 
 use log::{info, log, warn};
 use nix::fcntl::{open, OFlag};
@@ -42,11 +43,12 @@ impl Executable {
         let artifact_file = open(path, OFlag::O_RDONLY, Mode::empty())
             .map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
 
-        Ok(Executable(OwnedFd(artifact_file)))
+        Ok(Executable(unsafe { OwnedFd::from_raw_fd(artifact_file) }))
     }
 
     pub fn execute(&self, arguments: &[CString]) -> io::Result<!> {
-        fexecve(self.0.as_raw_fd(), arguments, &[])
+        let backtrace = CString::new("RUST_BACKTRACE=1").unwrap();  
+        fexecve(self.0.as_raw_fd(), arguments, &[backtrace])
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
 
         // successful executions of fexecve don't return.

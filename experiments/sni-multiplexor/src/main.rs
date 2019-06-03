@@ -20,7 +20,6 @@ use tokio::reactor::Handle;
 use tokio::sync::mpsc::channel;
 
 use yscloud_config_model::AppConfiguration;
-
 use crate::state_track::{SessionCommand, SessionCommandData, SessionCreateCommand};
 
 mod config;
@@ -119,7 +118,7 @@ fn main() {
     let mut sni_director_sock = None;
     let mut management_sock = None;
     for file in &config.files {
-        if file.service_name == "org.yshi.sni-director.https" {
+        if file.service_name == "org.yshi.sni_multiplexor.https" {
             // 128 taken from rust stdlib
             ::nix::sys::socket::listen(file.file_num, 128).unwrap();
 
@@ -136,8 +135,8 @@ fn main() {
             break;
         }
     }
-    let sni_director_sock = sni_director_sock.unwrap();
-    let management_sock = management_sock.unwrap();
+    let sni_director_sock = sni_director_sock.expect("sni_director_sock");
+    let management_sock = management_sock.expect("management_sock");
 
     let def_handler = Handle::default();
     let data_listener: TcpListener =

@@ -58,9 +58,11 @@ fn write_session_info<W>(wri: &mut W, si: &Session) -> io::Result<()>
 where
     W: std::io::Write,
 {
-    write!(wri, "{} ", si.state.as_str())?;
+    write!(wri, "{} {} ", si.session_id.fmt_base62(), si.state.as_str())?;
     write_sock_addr_pair(wri, &si.client_conn)?;
-
+    if let Some(ref bn) = si.backend_name {
+        write!(wri, "backend_name={} ", bn)?;
+    }
     if let Some(ref bc) = si.backend_conn {
         write!(wri, "backend_connect_addr=")?;
         write_sock_addr_pair(wri, bc)?;
@@ -68,6 +70,7 @@ where
     if let Some(ref bcl) = si.backend_connect_latency {
         write!(wri, "backend_connect_latency_ms={} ", bcl.as_millis())?;
     }
+    write!(wri, "session_age_ms={} ", si.start_time.elapsed().as_millis())?;
     write!(
         wri,
         "last_xmit_ago_ms={} ",

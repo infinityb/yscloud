@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
+use log::{info};
 use ksuid::Ksuid;
 
 use crate::sni::SocketAddrPair;
@@ -29,7 +30,7 @@ pub enum SessionCommandData {
     Destroy,
     Create(SessionCreateCommand),
     StartConnecting,
-    Connected(SocketAddrPair, Duration),
+    Connected(String, SocketAddrPair, Duration),
     XmitClientToBackend(u64),
     XmitBackendToClient(u64),
     ShutdownRead,
@@ -55,6 +56,7 @@ pub struct Session {
     pub session_id: Ksuid,
     pub start_time: Instant,
     pub client_conn: SocketAddrPair,
+    pub backend_name: Option<String>,
     pub backend_conn: Option<SocketAddrPair>,
     pub backend_connect_latency: Option<Duration>,
     pub state: SessionState,
@@ -69,6 +71,7 @@ impl Session {
             session_id,
             start_time: creat.start_time,
             client_conn: creat.client_conn.clone(),
+            backend_name: None,
             backend_conn: None,
             backend_connect_latency: None,
             state: SessionState::Handshaking,
@@ -97,7 +100,10 @@ impl SessionManager {
     pub fn apply_command(&mut self, cmd: &SessionCommand) {
         match cmd.data {
             SessionCommandData::Destroy => {
-                self.sessions.remove(&cmd.session_id);
+                info!("removing session: {} => {}", cmd.session_id.fmt_base62(),
+                    self.sessions.remove(&cmd.session_id).is_some()
+                    );
+                // self.sessions.remove(&cmd.session_id).is_some()
                 return;
             },
             SessionCommandData::Create(ref creat) => {
@@ -114,8 +120,9 @@ impl SessionManager {
             SessionCommandData::Destroy
             | SessionCommandData::Create(..)
             | SessionCommandData::StartConnecting => (),
-            SessionCommandData::Connected(ref sap, lat) => {
+            SessionCommandData::Connected(ref bn, ref sap, lat) => {
                 inst.state = SessionState::Connected;
+                inst.backend_name = Some(bn.clone());
                 inst.backend_conn = Some(sap.clone());
                 inst.backend_connect_latency = Some(lat);
             }

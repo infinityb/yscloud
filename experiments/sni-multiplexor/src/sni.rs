@@ -321,6 +321,7 @@ where
     // TODO/XXX: we need a timeout thing.
     let (client_sink, client_stream) = client.split();
     let mut proxy_buf = BytesMut::with_capacity(107);
+    let closer_client_info2 = client_info.clone();
 
     #[allow(clippy::write_with_newline)]
     // The protocol dictates the use of carriage return, which writeln!() might
@@ -386,7 +387,19 @@ where
                     Some(..) | None => Box::new(future::err(())),
                 }
             },
-        );
+        ).or_else(move |err| {
+            info!(
+                "{}: finished with error after {}ms: ??",
+                closer_client_info2.session_id.fmt_base62(),
+                duration_milliseconds(closer_client_info2.start_time.elapsed()),
+            );
+
+            closer_client_info2.stats_tx
+                .send(SessionCommand {
+                    session_id: closer_client_info2.session_id,
+                    data: SessionCommandData::Destroy,
+                }).map(|_| ()).map_err(|_| ())
+        });
     Box::new(client_fut)
 }
 
@@ -447,15 +460,13 @@ where
             .map(|_| ())
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e))
     });
-    let out = s2c.join(c2s).and_then(move |_| {
+    let out = s2c.join(c2s).map(|_| ()).then(move |rr| {
         session4
             .stats_tx
             .send(SessionCommand {
                 session_id: session4.session_id,
                 data: SessionCommandData::Destroy,
-            })
-            .map(|_| ())
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))
+            }).then(move |_| rr)
     });
 
     Box::new(out)
@@ -490,6 +501,8 @@ where
         hostname
     );
 
+    let closer_client_info2 = client_info.clone();
+    let hostname2 = hostname.clone();
     let copy = resolver
         .resolve(&hostname)
         .timeout(Duration::from_secs(3))
@@ -514,6 +527,7 @@ where
                         .send(SessionCommand {
                             session_id: client_info.session_id,
                             data: SessionCommandData::Connected(
+                                hostname2,
                                 pair,
                                 client_info.start_time.elapsed(),
                             ),
@@ -555,13 +569,19 @@ where
                 duration_milliseconds(connect_time.elapsed()),
             );
         })
-        .map_err(move |err| {
+        .or_else(move |err| {
             info!(
                 "{}: finished with error after {}ms: {}",
                 connection_id.fmt_base62(),
                 duration_milliseconds(connect_time.elapsed()),
                 err,
             );
+
+            closer_client_info2.stats_tx
+                .send(SessionCommand {
+                    session_id: closer_client_info2.session_id,
+                    data: SessionCommandData::Destroy,
+                }).map(|_| ()).map_err(|_| ())
         });
     Box::new(copy)
 }
