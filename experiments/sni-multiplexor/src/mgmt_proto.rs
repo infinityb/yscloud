@@ -1,14 +1,23 @@
-use bytes::BytesMut;
-use log::error;
 use std::io;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
+
+use bytes::BytesMut;
+use failure::{Error, Fail};
+
 use tokio::codec::{Decoder, Encoder, Framed};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::prelude::{future, Future, Sink, Stream};
 
 use crate::sni::SocketAddrPair;
 use crate::state_track::{Session, SessionManager};
+
+#[derive(Debug, Fail)]
+#[fail(display = "protocol error")]
+struct MgmtProtocolError {
+    recoverable: bool,
+    message: String,
+}
 
 pub struct AsciiManagerServer {}
 
@@ -23,12 +32,17 @@ pub enum AsciiManagerRequest {
 }
 
 impl FromStr for AsciiManagerRequest {
-    type Err = io::Error;
+    type Err = Error;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         Ok(match value {
             "print-active-sessions" => AsciiManagerRequest::PrintActiveSessions,
-            _ => return Err(io::Error::new(io::ErrorKind::Other, "unknown command")),
+            _ => {
+                return Err(MgmtProtocolError {
+                    recoverable: true,
+                    message: format!("unknown command: {}", value),
+                }.into());
+            }
         })
     }
 }
@@ -114,7 +128,7 @@ fn encode_print_active_sessions(
 impl Encoder for AsciiManagerServer {
     type Item = AsciiManagerResponse;
 
-    type Error = io::Error;
+    type Error = Error;
 
     fn encode(&mut self, item: Self::Item, dst: &mut BytesMut) -> Result<(), Self::Error> {
         let mut scratch = vec![0; 1024];
@@ -132,16 +146,33 @@ impl Encoder for AsciiManagerServer {
 impl Decoder for AsciiManagerServer {
     type Item = AsciiManagerRequest;
 
-    type Error = io::Error;
+    type Error = Error;
 
     fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
         use std::str::from_utf8;
 
         let line = match src.iter().position(|x| *x == b'\n') {
             Some(eol) => src.split_to(eol + 1).freeze(),
-            None => return Ok(None),
+            None => {
+                if 4096 < src.len() {
+                    return Err(MgmtProtocolError {
+                        recoverable: false,
+                        message: "line too long - connection terminated".to_string(),
+                    }.into());
+                }
+
+                return Ok(None);
+            }
         };
-        let mut line = from_utf8(&*line).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+
+        let mut line = from_utf8(&*line)
+            .map_err(|e| {
+                MgmtProtocolError {
+                    recoverable: false,
+                    message: format!("could not process line: {}", e),
+                }
+            })?;
+
         line = line.trim();
         AsciiManagerRequest::from_str(line).map(Some)
     }
@@ -150,7 +181,7 @@ impl Decoder for AsciiManagerServer {
 pub fn start_management_client<A>(
     sessman: Arc<Mutex<SessionManager>>,
     client: Framed<A, AsciiManagerServer>,
-) -> Box<dyn Future<Item = (), Error = ()> + Send>
+) -> Box<dyn Future<Item = (), Error = Error> + Send>
 where
     A: AsyncRead + AsyncWrite + Send + 'static,
 {
@@ -158,34 +189,26 @@ where
 
     let fut = stream
         .into_future()
-        .map_err(|(e, _stream)| {
-            error!("error receiving ascii manager request: {}", e);
-        })
+        .map_err(|(e, _stream)| e)
         .and_then(move |(req, stream)| recursive_handle(sessman, stream, sink, req));
     Box::new(fut)
 }
 
 fn recursive_handle<St, Si>(
     sessman: Arc<Mutex<SessionManager>>,
-    stream: St,
+    _stream: St,
     sink: Si,
     req: Option<AsciiManagerRequest>,
-) -> Box<dyn Future<Item = (), Error = ()> + Send>
+) -> Box<dyn Future<Item = (), Error = Error> + Send>
 where
-    St: Stream<Item = AsciiManagerRequest, Error = io::Error> + Send + Sync + 'static,
-    Si: Sink<SinkItem = AsciiManagerResponse, SinkError = io::Error> + Send + Sync + 'static,
+    St: Stream<Item = AsciiManagerRequest, Error = Error> + Send + Sync + 'static,
+    Si: Sink<SinkItem = AsciiManagerResponse, SinkError = Error> + Send + Sync + 'static,
 {
     let sessions = sessman.lock().unwrap().get_sessions();
-    if let Some(req) = req {
+    if let Some(_req) = req {
         let fut = sink
             .send(AsciiManagerResponse::PrintActive(sessions))
-            .map_err(|e| {
-                error!("error sending ascii manager response: {}", e);
-            })
-            .map(move |sink| {
-                recursive_handle(sessman, stream, sink, Some(req));
-            });
-
+            .map(move |_sink| ());
         Box::new(fut)
     } else {
         Box::new(future::ok(()))

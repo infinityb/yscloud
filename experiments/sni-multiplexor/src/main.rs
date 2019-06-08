@@ -167,7 +167,10 @@ fn main() {
         .incoming()
         .for_each(move |socket| {
             let framed = AsciiManagerServer::new().framed(socket);
-            tokio::spawn(start_management_client(mgmt_sessman.clone(), framed));
+            tokio::spawn(start_management_client(mgmt_sessman.clone(), framed)
+                .map_err(|e| {
+                    warn!("management client terminated: {}", e);
+                }));
             Ok(())
         })
         .map_err(|e| eprintln!("accept error: {}", e));
@@ -193,6 +196,7 @@ fn main() {
                         client_conn: client_conn.clone(),
                     })
                 }).await.map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+
                 let client_meta = ClientMetadata {
                     session_id,
                     start_time,

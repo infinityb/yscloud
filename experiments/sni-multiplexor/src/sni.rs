@@ -1,22 +1,25 @@
-use std::fmt::{self, Write};
+use std::fmt::{self, Write as _Write};
 use std::fs::{remove_file, File};
-use std::io::{self, Write as IoWrite};
+use std::io::{self, Write};
 use std::net::{SocketAddr, SocketAddrV4, SocketAddrV6};
 use std::sync::Arc;
+use std::time::Duration;
 use std::time::Instant;
 
 use bytes::{Bytes, BytesMut};
 use copy_arena::Arena;
 use futures01::prelude::{Future as LegacyFuture};
 use futures::compat::{Compat01As03, Compat01As03Sink};
+use futures::future;
+use futures::prelude::{Sink, SinkExt, Stream, StreamExt};
 use ksuid::Ksuid;
 use log::{debug, info, warn};
-use std::time::Duration;
-use tokio::codec::{Decoder, Encoder, Framed};
+use tokio::codec::{Framed, Decoder, Encoder};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::prelude::FutureExt;
 use tokio::prelude::stream::{SplitStream, SplitSink};
 use tokio::sync::mpsc::Sender;
+
 
 use tls::{
     extract_record, ByteIterRead, ClientHello, Extension, ExtensionServerName, Handshake,
@@ -26,11 +29,6 @@ use tls::{
 use crate::config::Resolver;
 use crate::state_track::{SessionCommand, SessionCommandData};
 
-#[derive(Debug, Copy, Clone)]
-pub struct AlertError {
-    alert_description: u8,
-}
-
 const DEFAULT_SNI_DETECTOR_MAX_LEN: usize = 20480;
 
 pub const ALERT_INTERNAL_ERROR: AlertError = AlertError {
@@ -39,6 +37,17 @@ pub const ALERT_INTERNAL_ERROR: AlertError = AlertError {
 pub const ALERT_UNRECOGNIZED_NAME: AlertError = AlertError {
     alert_description: 112,
 };
+
+
+enum Direction {
+    BackendToClient,
+    ClientToBackend,
+}
+
+#[derive(Debug, Copy, Clone)]
+pub struct AlertError {
+    alert_description: u8,
+}
 
 impl std::error::Error for AlertError {}
 
@@ -135,20 +144,18 @@ impl Decoder for SniDetectorCodec {
 
     fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
         use tls::{Error as TlsError, ErrorKind as TlsErrorKind};
-        use tokio::io::{Error as TokError, ErrorKind as TokErrorKind};
-
-        fn fixup_err(tls: TlsError) -> TokError {
+        fn fixup_err(tls: TlsError) -> io::Error {
             match tls.kind() {
                 TlsErrorKind::ProtocolViolation => {
-                    TokError::new(TokErrorKind::Other, ALERT_INTERNAL_ERROR)
+                    io::Error::new(io::ErrorKind::Other, ALERT_INTERNAL_ERROR)
                 }
                 TlsErrorKind::Truncated => {
                     warn!("I think this shouldn't happen: {}", tls);
-                    TokError::new(TokErrorKind::Other, ALERT_INTERNAL_ERROR)
+                    io::Error::new(io::ErrorKind::Other, ALERT_INTERNAL_ERROR)
                 }
                 TlsErrorKind::Other => {
                     warn!("got Other error: {}", tls);
-                    TokError::new(TokErrorKind::Other, ALERT_INTERNAL_ERROR)
+                    io::Error::new(io::ErrorKind::Other, ALERT_INTERNAL_ERROR)
                 }
             }
         }
@@ -163,7 +170,7 @@ impl Decoder for SniDetectorCodec {
 
         if self.max_length < src.len() {
             warn!("Handshake too large: {} < {}", self.max_length, src.len());
-            return Err(TokError::new(TokErrorKind::Other, ALERT_INTERNAL_ERROR));
+            return Err(io::Error::new(io::ErrorKind::Other, ALERT_INTERNAL_ERROR));
         }
 
         let mut allocator = self.arena.allocator();
@@ -321,7 +328,6 @@ where
     A: AsyncRead + AsyncWrite + Send + 'static,
 {
     use futures01::prelude::Stream;
-    use futures::prelude::SinkExt;
 
     info!(
         "{}: started connection from {}",
@@ -414,103 +420,103 @@ where
     result
 }
 
-mod helpers {
-    use std::io;
+#[allow(clippy::needless_lifetimes)]
+async fn unidirectional_copy<Si, St>(
+    mut client_meta: ClientMetadata,
+    mut sink: Si,
+    mut stream: St,
+    direction: Direction,
+) -> Result<(), io::Error>
+where
+    Si: Sink<SniDetectRecord> + Unpin,
+    St: Stream<Item=Result<SniDetectRecord, io::Error>> + Unpin,
+    Si::SinkError: std::error::Error + Sync + Send + 'static,
+{
+    loop {
+        let (stream_next, stream_tail) = stream.into_future().await;
+        stream = stream_tail;
+        match stream_next {
+            Some(rec) => {
+                let rec = rec.map_err(|err| {
+                    warn!("unidirectional_copy::{}: {}", line!(), err);
+                    err
+                })?;
+                let bytes = rec.rec_byte_size();
 
-    use futures::compat::{Compat01As03, Compat01As03Sink};
-    use futures::future;
-    use futures::prelude::{Sink, SinkExt, Stream, StreamExt};
-    use tokio::codec::Framed;
-    use tokio::io::{AsyncRead, AsyncWrite};
-    use tokio::prelude::stream::{SplitStream, SplitSink};
+                let data = match direction {
+                    Direction::BackendToClient => SessionCommandData::XmitBackendToClient(bytes),
+                    Direction::ClientToBackend => SessionCommandData::XmitClientToBackend(bytes),
+                };
 
-    use crate::sni::SniDetectorCodec;
-    use super::{SniDetectRecord, ClientMetadata,
-        SessionCommand, SessionCommandData, SniPassCodec};
+                client_meta.stats_tx.send(SessionCommand {
+                    session_id: client_meta.session_id,
+                    data,
+                }).await.map_err(|e| {
+                    io::Error::new(io::ErrorKind::Other, e)
+                }).map_err(|err| {
+                    warn!("unidirectional_copy::{}: {}", line!(), err);
+                    err
+                })?;
 
-    enum Direction {
-        BackendToClient,
-        ClientToBackend,
-    }
-
-    #[allow(clippy::needless_lifetimes)]
-    async fn unidirectional_copy<Si, St>(
-        mut client_meta: ClientMetadata,
-        mut sink: Si,
-        mut stream: St,
-        direction: Direction,
-    ) -> Result<(), io::Error>
-    where
-        Si: Sink<SniDetectRecord> + Unpin,
-        St: Stream<Item=Result<SniDetectRecord, io::Error>> + Unpin,
-        Si::SinkError: std::error::Error + Sync + Send + 'static,
-    {
-        loop {
-            let (stream_next, stream_tail) = stream.into_future().await;
-            stream = stream_tail;
-            match stream_next {
-                Some(rec) => {
-                    let rec = rec?;
-                    let bytes = rec.rec_byte_size();
-
-                    let data = SessionCommandData::XmitBackendToClient(bytes);
-
-                    client_meta.stats_tx.send(SessionCommand {
-                        session_id: client_meta.session_id,
-                        data,
-                    }).await.map_err(|e| {
-                        io::Error::new(io::ErrorKind::Other, e)
-                    })?;
-
-                    sink.send(rec).await.map_err(|e| {
-                        io::Error::new(io::ErrorKind::Other, e)
-                    })?;
-                }
-                None => break,
+                sink.send(rec).await.map_err(|e| {
+                    io::Error::new(io::ErrorKind::Other, e)
+                }).map_err(|err| {
+                    warn!("unidirectional_copy::{}: {}", line!(), err);
+                    err
+                })?;
             }
+            None => break,
         }
-        let sess_cmd = SessionCommand {
-            session_id: client_meta.session_id,
-            data: match direction {
-                Direction::BackendToClient => SessionCommandData::ShutdownRead,
-                Direction::ClientToBackend => SessionCommandData::ShutdownWrite,
-            },
-        };
-        client_meta.stats_tx.send(sess_cmd).await.map_err(|e| {
-            io::Error::new(io::ErrorKind::Other, e)
-        })?;
-        Ok(())
     }
 
-    pub async fn bidirectional_copy<A, B>(
-        meta: ClientMetadata,
-        client_stream: Compat01As03<SplitStream<Framed<A, SniDetectorCodec>>>,
-        client_sink: Compat01As03Sink<SplitSink<Framed<A, SniDetectorCodec>>, SniDetectRecord>,
-        server_stream: Compat01As03<SplitStream<Framed<B, SniPassCodec>>>,
-        server_sink: Compat01As03Sink<SplitSink<Framed<B, SniPassCodec>>, SniDetectRecord>,
-    ) -> Result<(), io::Error>
-    where
-        A: AsyncRead + AsyncWrite + Send + 'static,
-        B: AsyncRead + AsyncWrite + Send + 'static,
-    {
-        let server_to_client = unidirectional_copy(
-            meta.clone(), client_sink, server_stream,
-            Direction::BackendToClient);
+    warn!("closing sink!");
+    sink.close().await.map_err(|e| {
+        io::Error::new(io::ErrorKind::Other, e)
+    })?;
+    warn!("closed sink!");
+    drop(sink);
 
-        let client_to_server = unidirectional_copy(
-            meta.clone(), server_sink, client_stream,
-            Direction::ClientToBackend);
+    let sess_cmd = SessionCommand {
+        session_id: client_meta.session_id,
+        data: match direction {
+            Direction::BackendToClient => SessionCommandData::ShutdownRead,
+            Direction::ClientToBackend => SessionCommandData::ShutdownWrite,
+        },
+    };
+    client_meta.stats_tx.send(sess_cmd).await.map_err(|e| {
+        io::Error::new(io::ErrorKind::Other, e)
+    })?;
+    Ok(())
+}
 
-        let (s2c, c2s) = future::join(
-            server_to_client,
-            client_to_server,
-        ).await;
+pub async fn bidirectional_copy<A, B>(
+    meta: ClientMetadata,
+    client_stream: Compat01As03<SplitStream<Framed<A, SniDetectorCodec>>>,
+    client_sink: Compat01As03Sink<SplitSink<Framed<A, SniDetectorCodec>>, SniDetectRecord>,
+    server_stream: Compat01As03<SplitStream<Framed<B, SniPassCodec>>>,
+    server_sink: Compat01As03Sink<SplitSink<Framed<B, SniPassCodec>>, SniDetectRecord>,
+) -> Result<(), io::Error>
+where
+    A: AsyncRead + AsyncWrite + Send + 'static,
+    B: AsyncRead + AsyncWrite + Send + 'static,
+{
+    let server_to_client = unidirectional_copy(
+        meta.clone(), client_sink, server_stream,
+        Direction::BackendToClient);
 
-        s2c?;
-        c2s?;
+    let client_to_server = unidirectional_copy(
+        meta.clone(), server_sink, client_stream,
+        Direction::ClientToBackend);
 
-        Ok(())
-    }
+    let (s2c, c2s) = future::join(
+        server_to_client,
+        client_to_server,
+    ).await;
+
+    s2c?;
+    c2s?;
+
+    Ok(())
 }
 
 fn duration_milliseconds(dur: Duration) -> u64 {
@@ -518,10 +524,6 @@ fn duration_milliseconds(dur: Duration) -> u64 {
     out += u64::from(dur.subsec_nanos()) / 1_000_000;
     out += dur.as_secs() * 1_000;
     out
-}
-
-struct ConnectFailure {
-    //
 }
 
 async fn connect_hostname_helper<A>(
@@ -535,7 +537,6 @@ async fn connect_hostname_helper<A>(
 where
     A: AsyncRead + AsyncWrite + Send + 'static,
 {
-    use futures::prelude::SinkExt;
     use futures01::stream::Stream;
 
     let client_meta_copy = client_meta.clone();
@@ -565,6 +566,7 @@ where
     let backend_stream = Compat01As03::new(backend_stream);
 
     if let Some(pair) = sockaddr_pair {
+        warn!("{} connection", client_meta.session_id.fmt_base62());
         let send_res = client_meta.stats_tx.send(SessionCommand {
             session_id: client_meta.session_id,
             data: SessionCommandData::Connected(
@@ -589,7 +591,7 @@ where
         io::Error::new(io::ErrorKind::Other, e)
     })?;
     
-    helpers::bidirectional_copy(client_meta.clone(),
+    bidirectional_copy(client_meta.clone(),
         client_stream, client_sink, backend_stream, backend_sink).await?;
 
     Ok(())
@@ -606,9 +608,8 @@ async fn connect_hostname<A>(
 where
     A: AsyncRead + AsyncWrite + Send + 'static,
 {
-    let session = client_meta.clone();
     let connection_id = client_meta.session_id;
-    let connect_time = session.start_time;
+    let connect_time = client_meta.start_time;
 
     info!(
         "{}: requested to connect to backend {}",
