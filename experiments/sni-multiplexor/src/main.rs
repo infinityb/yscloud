@@ -144,8 +144,8 @@ fn main() {
     let mgmt_listener: UnixListener = UnixListener::from_std(management_sock, &def_handler).unwrap();
 
     let resolver: MemoryResolver = serde_json::from_str(&extras_str).unwrap();
-    let resolver: Box<Resolver + Send + Sync> = Box::new(resolver);
-    let resolver: Arc<Mutex<Arc<Resolver + Send + Sync>>> = Arc::new(Mutex::new(resolver.into()));
+    let resolver: Box<dyn Resolver + Send + Sync> = Box::new(resolver);
+    let resolver: Arc<Mutex<Arc<dyn Resolver + Send + Sync>>> = Arc::new(Mutex::new(resolver.into()));
 
     let server_resolver = resolver.clone();
     let sessman = Arc::new(Mutex::new(SessionManager::new()));
