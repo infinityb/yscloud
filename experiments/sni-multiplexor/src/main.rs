@@ -1,13 +1,13 @@
 #![feature(await_macro, async_await)]
-
 use std::fs::File;
 use std::net::TcpListener as StdTcpListener;
 use std::os::unix::net::UnixListener as StdUnixListener;
 use std::os::unix::io::{FromRawFd, RawFd};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
+use std::io;
 
-use log::{info};
+use log::{warn, info};
 use clap::{App, Arg};
 use ksuid::Ksuid;
 use log::LevelFilter;
@@ -15,9 +15,12 @@ use serde::{Deserialize, Serialize};
 use tokio::codec::Decoder;
 use tokio::net::TcpListener;
 use tokio::net::UnixListener;
-use tokio::prelude::{Future, Sink, Stream};
+use tokio::prelude::{Future, Stream};
 use tokio::reactor::Handle;
 use tokio::sync::mpsc::channel;
+use futures::compat::Compat01As03Sink;
+use futures::prelude::{TryFutureExt, SinkExt, FutureExt};
+
 
 use yscloud_config_model::AppConfiguration;
 use crate::state_track::{SessionCommand, SessionCommandData, SessionCreateCommand};
@@ -144,8 +147,8 @@ fn main() {
     let mgmt_listener: UnixListener = UnixListener::from_std(management_sock, &def_handler).unwrap();
 
     let resolver: MemoryResolver = serde_json::from_str(&extras_str).unwrap();
-    let resolver: Box<dyn Resolver + Send + Sync> = Box::new(resolver);
-    let resolver: Arc<Mutex<Arc<dyn Resolver + Send + Sync>>> = Arc::new(Mutex::new(resolver.into()));
+    let resolver: Box<dyn Resolver + Send + Sync + Unpin + 'static> = Box::new(resolver);
+    let resolver: Arc<Mutex<Arc<dyn Resolver + Send + Sync + Unpin + 'static>>> = Arc::new(Mutex::new(resolver.into()));
 
     let server_resolver = resolver.clone();
     let sessman = Arc::new(Mutex::new(SessionManager::new()));
@@ -172,33 +175,40 @@ fn main() {
     let data_server = data_listener
         .incoming()
         .map(move |socket| (stats_tx.clone(), server_resolver.clone(), socket))
+        .map_err(|e| warn!("data-server accept error: {}", e))
         .for_each(move |(stats_tx, server_resolver, socket)| {
-            let session_id = Ksuid::generate();
+            let stats_tx_impl = stats_tx.clone();
+            tokio::spawn(async {
+                let server_resolver = server_resolver;
+                let start_time = Instant::now();
+                let session_id = Ksuid::generate();
 
-            let start_time = Instant::now();
-            let client_conn = SocketAddrPair::from_pair(socket.local_addr()?, socket.peer_addr()?)?;
+                let client_conn = SocketAddrPair::from_pair(socket.local_addr()?, socket.peer_addr()?)?;
+                let mut stats_tx = Compat01As03Sink::new(stats_tx_impl.clone());
 
-            tokio::spawn(stats_tx.send(SessionCommand {
-                session_id,
-                data: SessionCommandData::Create(SessionCreateCommand {
-                    start_time,
-                    client_conn: client_conn.clone(),
-                }),
-            }).map_err(|e| info!("failed to send to stats gatherer: {}", e)).and_then(move |stats_tx| {
+                stats_tx.send(SessionCommand {
+                    session_id,
+                    data: SessionCommandData::Create(SessionCreateCommand {
+                        start_time,
+                        client_conn: client_conn.clone(),
+                    })
+                }).await.map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
                 let client_meta = ClientMetadata {
                     session_id,
                     start_time,
                     client_conn,
+                    stats_tx_impl,
                     stats_tx,
                 };
                 let resolver = server_resolver.lock().unwrap().clone();
                 let framed = SniDetectorCodec::new(session_id).framed(socket);
-                start_client(resolver, client_meta, framed)
-            }));
+
+                start_client(resolver, client_meta, framed).await?;
+
+                Ok(())
+            }.boxed().compat().map_err(|e: io::Error| eprintln!("accept error: {}", e)));
+
             Ok(())
-        })
-        .map_err(|err| {
-            println!("accept error = {:?}", err);
         });
 
     tokio::run(stats_gather.join(mgmt_server).join(data_server).map(|_| ()));
