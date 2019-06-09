@@ -410,6 +410,7 @@ where
 mod helpers {
     use std::io;
 
+    use log::warn;
     use futures::compat::{Compat01As03, Compat01As03Sink};
     use futures::future;
     use futures::prelude::{Sink, SinkExt, Stream, StreamExt};
@@ -421,6 +422,7 @@ mod helpers {
     use super::{SniDetectRecord, ClientMetadata,
         SessionCommand, SessionCommandData, SniPassCodec};
 
+    #[derive(Debug)]
     enum Direction {
         BackendToClient,
         ClientToBackend,
@@ -454,16 +456,27 @@ mod helpers {
                         session_id: meta.session_id,
                         data,
                     }).await.map_err(|e| {
+                        warn!("{} xmit-stats {}", meta.session_id.fmt_base62(), bytes);
                         io::Error::new(io::ErrorKind::Other, e)
                     })?;
 
                     sink.send(rec).await.map_err(|e| {
+                        warn!("{} xmit-data", meta.session_id.fmt_base62());
                         io::Error::new(io::ErrorKind::Other, e)
                     })?;
                 }
                 None => break,
             }
         }
+        warn!("{} {:?} loop end", meta.session_id.fmt_base62(), direction);
+
+        sink.close().await.map_err(|e| {
+            warn!("{} sink-close", meta.session_id.fmt_base62());
+            io::Error::new(io::ErrorKind::Other, e)
+        })?;
+
+        drop(sink);
+
         let sess_cmd = SessionCommand {
             session_id: meta.session_id,
             data: match direction {
@@ -472,6 +485,7 @@ mod helpers {
             },
         };
         stats_tx.send(sess_cmd).await.map_err(|e| {
+            warn!("{} xmit-stats", meta.session_id.fmt_base62());
             io::Error::new(io::ErrorKind::Other, e)
         })?;
         Ok(())
@@ -540,6 +554,14 @@ where
         hostname
     );
 
+    stats_tx
+        .send(SessionCommand {
+            session_id: session.session_id,
+            data: SessionCommandData::BackendConnecting(hostname.to_string()),
+        }).await.map_err(|e| {
+            io::Error::new(io::ErrorKind::Other, e)
+        })?;
+
     let stream_fut = resolver.resolve(&hostname)
         .timeout(Duration::from_secs(3));
 
@@ -573,11 +595,7 @@ where
     if let Some(pair) = sockaddr_pair {
         let send_res = stats_tx.send(SessionCommand {
             session_id: client_info.session_id,
-            data: SessionCommandData::Connected(
-                hostname,
-                pair,
-                client_info.start_time.elapsed(),
-            ),
+            data: SessionCommandData::Connected(pair)
         }).await;
 
         if let Err(err) = send_res {

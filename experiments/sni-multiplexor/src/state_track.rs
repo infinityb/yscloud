@@ -1,12 +1,13 @@
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use log::{info};
+use log::{debug, info};
 use ksuid::Ksuid;
 
 use crate::sni::SocketAddrPair;
 
-#[derive(Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionState {
     Handshaking,
     BackendConnecting,
@@ -29,13 +30,12 @@ pub struct SessionCommand {
 pub enum SessionCommandData {
     Destroy,
     Create(SessionCreateCommand),
-    StartConnecting,
-    Connected(String, SocketAddrPair, Duration),
+    BackendConnecting(String),
+    Connected(SocketAddrPair),
     XmitClientToBackend(u64),
     XmitBackendToClient(u64),
     ShutdownRead,
     ShutdownWrite,
-    Shutdown,
 }
 
 impl SessionState {
@@ -58,6 +58,7 @@ pub struct Session {
     pub client_conn: SocketAddrPair,
     pub backend_name: Option<String>,
     pub backend_conn: Option<SocketAddrPair>,
+    pub backend_connect_start: Option<Instant>,
     pub backend_connect_latency: Option<Duration>,
     pub state: SessionState,
     pub last_xmit: Instant,
@@ -73,6 +74,7 @@ impl Session {
             client_conn: creat.client_conn.clone(),
             backend_name: None,
             backend_conn: None,
+            backend_connect_start: None,
             backend_connect_latency: None,
             state: SessionState::Handshaking,
             last_xmit: Instant::now(),
@@ -84,12 +86,14 @@ impl Session {
 
 pub struct SessionManager {
     sessions: HashMap<Ksuid, Session>,
+    // removal_queue: BTreeMap<Instant, Ksuid>,
 }
 
 impl SessionManager {
     pub fn new() -> SessionManager {
         SessionManager {
             sessions: HashMap::new(),
+            // removal_queue: BTreeMap::new(),
         }
     }
 
@@ -116,15 +120,23 @@ impl SessionManager {
 
         let mut inst = self.sessions.get_mut(&cmd.session_id).unwrap();
 
+        let pre_state = inst.state.clone();
+        let mut state_change = false;
         match cmd.data {
             SessionCommandData::Destroy
-            | SessionCommandData::Create(..)
-            | SessionCommandData::StartConnecting => (),
-            SessionCommandData::Connected(ref bn, ref sap, lat) => {
+            | SessionCommandData::Create(..) => (),
+            SessionCommandData::StartConnecting(ref backend_name) => {
+                state_change = true;
+                inst.backend_name = Some(backend_name.clone());
+                inst.backend_connect_start = Some(Instant::now());
+            }
+            SessionCommandData::Connected(ref sap) => {
+                state_change = true;
                 inst.state = SessionState::Connected;
-                inst.backend_name = Some(bn.clone());
                 inst.backend_conn = Some(sap.clone());
-                inst.backend_connect_latency = Some(lat);
+                if let Some(start) = inst.backend_connect_start {
+                    inst.backend_connect_latency = Some(start.elapsed());
+                }
             }
             SessionCommandData::XmitClientToBackend(bytes) => {
                 inst.bytes_client_to_backend += bytes;
@@ -135,14 +147,24 @@ impl SessionManager {
                 inst.last_xmit = Instant::now();
             }
             SessionCommandData::ShutdownRead => {
-                inst.state = SessionState::ShutdownRead;
+                state_change = true;
+                inst.state = if inst.state == SessionState::ShutdownWrite {
+                    SessionState::Shutdown
+                } else {
+                    SessionState::ShutdownRead
+                };
             }
             SessionCommandData::ShutdownWrite => {
-                inst.state = SessionState::ShutdownWrite;
+                state_change = true;
+                inst.state = if inst.state == SessionState::ShutdownRead {
+                    SessionState::Shutdown
+                } else {
+                    SessionState::ShutdownWrite
+                };
             }
-            SessionCommandData::Shutdown => {
-                inst.state = SessionState::Shutdown;
-            }
+        }
+        if state_change {
+            debug!("{} {:?} -> {:?}", cmd.session_id.fmt_base62(), pre_state, inst.state);
         }
     }
 }
