@@ -8,19 +8,17 @@ use std::time::Instant;
 
 use bytes::{Bytes, BytesMut};
 use copy_arena::Arena;
-use futures01::prelude::{Future as LegacyFuture};
 use futures::compat::{Compat01As03, Compat01As03Sink};
-use futures::future::{self, Either, select, Aborted};
+use futures::future::{self, select, Aborted, Either};
 use futures::prelude::{Sink, SinkExt, Stream, StreamExt};
+use futures01::prelude::Future as LegacyFuture;
 use ksuid::Ksuid;
 use log::{debug, info, warn};
-use tokio::codec::{Framed, Decoder, Encoder};
+use tokio::codec::{Decoder, Encoder, Framed};
 use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::prelude::stream::{SplitSink, SplitStream};
 use tokio::prelude::FutureExt;
-use tokio::prelude::stream::{SplitStream, SplitSink};
 use tokio::sync::mpsc::Sender;
-
-
 
 use tls::{
     extract_record, ByteIterRead, ClientHello, Extension, ExtensionServerName, Handshake,
@@ -364,7 +362,6 @@ where
         }
     }
 
-    
     let client_fut = client_stream
         .into_future()
         .timeout(Duration::from_secs(3))
@@ -372,8 +369,7 @@ where
             if let Some((inner, _stream)) = e.into_inner() {
                 warn!(
                     "error with ClientHello for {}: {}",
-                    hanshake_client_meta_client_conn,
-                    inner
+                    hanshake_client_meta_client_conn, inner
                 );
             } else {
                 warn!(
@@ -382,10 +378,10 @@ where
                 );
             }
         });
-    
-    let (first_frame, client_stream_tail) = Compat01As03::new(client_fut).await
-        .map_err(|()| io::Error::new(io::ErrorKind::Other, format!("{}:{}", file!(), line!())))
-        ?;
+
+    let (first_frame, client_stream_tail) = Compat01As03::new(client_fut)
+        .await
+        .map_err(|()| io::Error::new(io::ErrorKind::Other, format!("{}:{}", file!(), line!())))?;
 
     let hostname;
     match first_frame {
@@ -393,7 +389,10 @@ where
             hostname = h;
         }
         Some(..) | None => {
-            return Err(io::Error::new(io::ErrorKind::Other, "something that isn't a hostname"));
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                "something that isn't a hostname",
+            ));
         }
     }
 
@@ -402,15 +401,23 @@ where
         // clears the whole thing.
         proxy_buf.take();
     }
-    let result = connect_hostname(client_meta, connector, hostname, proxy_buf.freeze(), client_sink, client_stream).await;
+    let result = connect_hostname(
+        client_meta,
+        connector,
+        hostname,
+        proxy_buf.freeze(),
+        client_sink,
+        client_stream,
+    )
+    .await;
 
     stats_tx
         .send(SessionCommand {
             session_id: client_meta_session_id,
             data: SessionCommandData::Destroy,
-        }).await.map_err(|e| {
-            io::Error::new(io::ErrorKind::Other, e)
-        })?;
+        })
+        .await
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
 
     result
 }
@@ -426,7 +433,7 @@ async fn unidirectional_copy<Si, St>(
 ) -> Result<(), io::Error>
 where
     Si: Sink<SniDetectRecord> + Unpin,
-    St: Stream<Item=Result<SniDetectRecord, io::Error>> + Unpin,
+    St: Stream<Item = Result<SniDetectRecord, io::Error>> + Unpin,
     Si::SinkError: std::error::Error + Sync + Send + 'static,
 {
     loop {
@@ -453,22 +460,22 @@ where
                     Direction::ClientToBackend => SessionCommandData::XmitClientToBackend(bytes),
                 };
 
-                stats_tx.send(SessionCommand {
-                    session_id,
-                    data,
-                }).await.map_err(|e| {
-                    io::Error::new(io::ErrorKind::Other, e)
-                }).map_err(|err| {
-                    warn!("unidirectional_copy::{}: {}", line!(), err);
-                    err
-                })?;
+                stats_tx
+                    .send(SessionCommand { session_id, data })
+                    .await
+                    .map_err(|e| io::Error::new(io::ErrorKind::Other, e))
+                    .map_err(|err| {
+                        warn!("unidirectional_copy::{}: {}", line!(), err);
+                        err
+                    })?;
 
-                sink.send(rec).await.map_err(|e| {
-                    io::Error::new(io::ErrorKind::Other, e)
-                }).map_err(|err| {
-                    warn!("unidirectional_copy::{}: {}", line!(), err);
-                    err
-                })?;
+                sink.send(rec)
+                    .await
+                    .map_err(|e| io::Error::new(io::ErrorKind::Other, e))
+                    .map_err(|err| {
+                        warn!("unidirectional_copy::{}: {}", line!(), err);
+                        err
+                    })?;
             }
             None => {
                 debug!("{} {:?} stream-fin", session_id.fmt_base62(), direction);
@@ -477,9 +484,9 @@ where
         }
     }
 
-    sink.close().await.map_err(|e| {
-        io::Error::new(io::ErrorKind::Other, e)
-    })?;
+    sink.close()
+        .await
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
     drop(sink);
 
     let sess_cmd = SessionCommand {
@@ -489,9 +496,10 @@ where
             Direction::ClientToBackend => SessionCommandData::ShutdownWrite,
         },
     };
-    stats_tx.send(sess_cmd).await.map_err(|e| {
-        io::Error::new(io::ErrorKind::Other, e)
-    })?;
+    stats_tx
+        .send(sess_cmd)
+        .await
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
     Ok(())
 }
 
@@ -509,17 +517,24 @@ where
     let s2c_stats_tx = Compat01As03Sink::new(client_meta.stats_tx_impl.clone());
     let c2s_stats_tx = Compat01As03Sink::new(client_meta.stats_tx_impl.clone());
     let server_to_client = unidirectional_copy(
-        client_meta.session_id, s2c_stats_tx, client_meta.aborter.clone(), client_sink, server_stream,
-        Direction::BackendToClient);
+        client_meta.session_id,
+        s2c_stats_tx,
+        client_meta.aborter.clone(),
+        client_sink,
+        server_stream,
+        Direction::BackendToClient,
+    );
 
     let client_to_server = unidirectional_copy(
-        client_meta.session_id, c2s_stats_tx, client_meta.aborter, server_sink, client_stream,
-        Direction::ClientToBackend);
+        client_meta.session_id,
+        c2s_stats_tx,
+        client_meta.aborter,
+        server_sink,
+        client_stream,
+        Direction::ClientToBackend,
+    );
 
-    let (s2c, c2s) = future::join(
-        server_to_client,
-        client_to_server,
-    ).await;
+    let (s2c, c2s) = future::join(server_to_client, client_to_server).await;
 
     s2c?;
     c2s?;
@@ -549,14 +564,17 @@ where
 
     let client_meta_session_id = client_meta.session_id;
 
-    client_meta.stats_tx.send(SessionCommand {
-        session_id: client_meta.session_id,
-        data: SessionCommandData::BackendConnecting(hostname.clone()),
-    }).await.map_err(|e| {
-        io::Error::new(io::ErrorKind::Other, e)
-    })?;
+    client_meta
+        .stats_tx
+        .send(SessionCommand {
+            session_id: client_meta.session_id,
+            data: SessionCommandData::BackendConnecting(hostname.clone()),
+        })
+        .await
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
 
-    let stream_fut = resolver.resolve(&hostname)
+    let stream_fut = resolver
+        .resolve(&hostname)
         .timeout(Duration::from_secs(3))
         .map_err(move |e| {
             if let Some(inner) = e.into_inner() {
@@ -583,10 +601,13 @@ where
 
     if let Some(pair) = sockaddr_pair {
         warn!("{} connection", client_meta_session_id.fmt_base62());
-        let send_res = client_meta.stats_tx.send(SessionCommand {
-            session_id: client_meta_session_id,
-            data: SessionCommandData::Connected(pair),
-        }).await;
+        let send_res = client_meta
+            .stats_tx
+            .send(SessionCommand {
+                session_id: client_meta_session_id,
+                data: SessionCommandData::Connected(pair),
+            })
+            .await;
 
         if let Err(err) = send_res {
             info!(
@@ -595,16 +616,23 @@ where
                 err,
             );
 
-            return Err(io::Error::new(io::ErrorKind::Other, err))
+            return Err(io::Error::new(io::ErrorKind::Other, err));
         }
     }
 
-    backend_sink.send(SniDetectRecord::PassThrough(proxy_line)).await.map_err(|e| {
-        io::Error::new(io::ErrorKind::Other, e)
-    })?;
-    
-    bidirectional_copy(client_meta,
-        client_stream, client_sink, backend_stream, backend_sink).await?;
+    backend_sink
+        .send(SniDetectRecord::PassThrough(proxy_line))
+        .await
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+
+    bidirectional_copy(
+        client_meta,
+        client_stream,
+        client_sink,
+        backend_stream,
+        backend_sink,
+    )
+    .await?;
 
     Ok(())
 }
@@ -629,7 +657,15 @@ where
         hostname
     );
 
-    let result = connect_hostname_helper(client_meta, resolver, hostname, proxy_line, client_sink, client_stream).await;
+    let result = connect_hostname_helper(
+        client_meta,
+        resolver,
+        hostname,
+        proxy_line,
+        client_sink,
+        client_stream,
+    )
+    .await;
 
     match result {
         Ok(()) => {
@@ -638,7 +674,7 @@ where
                 connection_id.fmt_base62(),
                 duration_milliseconds(connect_time.elapsed()),
             );
-        },
+        }
         Err(ref err) => {
             info!(
                 "{}: finished with error after {}ms: {}",

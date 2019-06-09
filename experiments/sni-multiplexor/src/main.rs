@@ -1,16 +1,18 @@
 #![feature(await_macro, async_await)]
 use std::fs::File;
+use std::io;
 use std::net::TcpListener as StdTcpListener;
-use std::os::unix::net::UnixListener as StdUnixListener;
 use std::os::unix::io::{FromRawFd, RawFd};
+use std::os::unix::net::UnixListener as StdUnixListener;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
-use std::io;
 
-use log::{warn, info};
 use clap::{App, Arg};
+use futures::compat::Compat01As03Sink;
+use futures::prelude::{FutureExt, SinkExt, TryFutureExt};
 use ksuid::Ksuid;
 use log::LevelFilter;
+use log::{info, warn};
 use serde::{Deserialize, Serialize};
 use tokio::codec::Decoder;
 use tokio::net::TcpListener;
@@ -18,12 +20,9 @@ use tokio::net::UnixListener;
 use tokio::prelude::{Future, Stream};
 use tokio::reactor::Handle;
 use tokio::sync::mpsc::channel;
-use futures::compat::Compat01As03Sink;
-use futures::prelude::{TryFutureExt, SinkExt, FutureExt};
 
-
-use yscloud_config_model::AppConfiguration;
 use crate::state_track::{SessionCommand, SessionCommandData, SessionCreateCommand};
+use yscloud_config_model::AppConfiguration;
 
 mod config;
 mod mgmt_proto;
@@ -144,11 +143,13 @@ fn main() {
     let def_handler = Handle::default();
     let data_listener: TcpListener =
         TcpListener::from_std(sni_director_sock, &def_handler).unwrap();
-    let mgmt_listener: UnixListener = UnixListener::from_std(management_sock, &def_handler).unwrap();
+    let mgmt_listener: UnixListener =
+        UnixListener::from_std(management_sock, &def_handler).unwrap();
 
     let resolver: MemoryResolver = serde_json::from_str(&extras_str).unwrap();
     let resolver: Box<dyn Resolver + Send + Sync + Unpin + 'static> = Box::new(resolver);
-    let resolver: Arc<Mutex<Arc<dyn Resolver + Send + Sync + Unpin + 'static>>> = Arc::new(Mutex::new(resolver.into()));
+    let resolver: Arc<Mutex<Arc<dyn Resolver + Send + Sync + Unpin + 'static>>> =
+        Arc::new(Mutex::new(resolver.into()));
 
     let server_resolver = resolver.clone();
     let sessman = Arc::new(Mutex::new(SessionManager::new()));
@@ -157,20 +158,23 @@ fn main() {
     let (stats_tx, stats_rx) = channel(128);
 
     let sessman_stats = Arc::clone(&sessman);
-    let stats_gather = stats_rx.for_each(move |cmd| {
-        let mut sessman = sessman_stats.lock().unwrap();
-        sessman.apply_command(cmd);
-        Ok(())
-    }).map_err(|e| info!("stats receiver died: {}", e));
+    let stats_gather = stats_rx
+        .for_each(move |cmd| {
+            let mut sessman = sessman_stats.lock().unwrap();
+            sessman.apply_command(cmd);
+            Ok(())
+        })
+        .map_err(|e| info!("stats receiver died: {}", e));
 
     let mgmt_server = mgmt_listener
         .incoming()
         .for_each(move |socket| {
             let framed = AsciiManagerServer::new().framed(socket);
-            tokio::spawn(start_management_client(mgmt_sessman.clone(), framed)
-                .map_err(|e| {
+            tokio::spawn(
+                start_management_client(mgmt_sessman.clone(), framed).map_err(|e| {
                     warn!("management client terminated: {}", e);
-                }));
+                }),
+            );
             Ok(())
         })
         .map_err(|e| eprintln!("accept error: {}", e));
@@ -181,36 +185,46 @@ fn main() {
         .map_err(|e| warn!("data-server accept error: {}", e))
         .for_each(move |(stats_tx, server_resolver, socket)| {
             let stats_tx_impl = stats_tx.clone();
-            tokio::spawn(async {
-                let server_resolver = server_resolver;
-                let start_time = Instant::now();
-                let session_id = Ksuid::generate();
+            tokio::spawn(
+                async {
+                    let server_resolver = server_resolver;
+                    let start_time = Instant::now();
+                    let session_id = Ksuid::generate();
 
-                let client_conn = SocketAddrPair::from_pair(socket.local_addr()?, socket.peer_addr()?)?;
-                let mut stats_tx = Compat01As03Sink::new(stats_tx_impl.clone());
+                    let client_conn =
+                        SocketAddrPair::from_pair(socket.local_addr()?, socket.peer_addr()?)?;
+                    let mut stats_tx = Compat01As03Sink::new(stats_tx_impl.clone());
 
-                let (creat, aborter) = SessionCreateCommand::new(start_time, client_conn.clone());
+                    let (creat, aborter) =
+                        SessionCreateCommand::new(start_time, client_conn.clone());
 
-                stats_tx.send(SessionCommand {
-                    session_id,
-                    data: SessionCommandData::Create(creat),
-                }).await.map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+                    stats_tx
+                        .send(SessionCommand {
+                            session_id,
+                            data: SessionCommandData::Create(creat),
+                        })
+                        .await
+                        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
 
-                let client_meta = ClientMetadata {
-                    session_id,
-                    start_time,
-                    client_conn,
-                    stats_tx_impl,
-                    stats_tx,
-                    aborter,
-                };
-                let resolver = server_resolver.lock().unwrap().clone();
-                let framed = SniDetectorCodec::new(session_id).framed(socket);
+                    let client_meta = ClientMetadata {
+                        session_id,
+                        start_time,
+                        client_conn,
+                        stats_tx_impl,
+                        stats_tx,
+                        aborter,
+                    };
+                    let resolver = server_resolver.lock().unwrap().clone();
+                    let framed = SniDetectorCodec::new(session_id).framed(socket);
 
-                start_client(resolver, client_meta, framed).await?;
+                    start_client(resolver, client_meta, framed).await?;
 
-                Ok(())
-            }.boxed().compat().map_err(|e: io::Error| eprintln!("accept error: {}", e)));
+                    Ok(())
+                }
+                    .boxed()
+                    .compat()
+                    .map_err(|e: io::Error| eprintln!("accept error: {}", e)),
+            );
 
             Ok(())
         });

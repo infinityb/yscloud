@@ -32,20 +32,18 @@ pub enum AsciiManagerRequest {
     DestroySession(Ksuid),
 }
 
-fn destroy_session_from_str_iter<'a, I>(mut parts: I) -> Result<Ksuid, Error> where I: Iterator<Item=&'a str> {
-    let ksuid = parts.next()
-        .ok_or_else(|| {
-            MgmtProtocolError {
-                recoverable: true,
-                message: "destroy-session takes one argument (a ksuid)".into(),
-            }
-        })?;
+fn destroy_session_from_str_iter<'a, I>(mut parts: I) -> Result<Ksuid, Error>
+where
+    I: Iterator<Item = &'a str>,
+{
+    let ksuid = parts.next().ok_or_else(|| MgmtProtocolError {
+        recoverable: true,
+        message: "destroy-session takes one argument (a ksuid)".into(),
+    })?;
 
-    let ksuid = Ksuid::from_base62(ksuid).map_err(|_err| {
-        MgmtProtocolError {
-            recoverable: true,
-            message: "destroy-session first argument: invalid ksuid".into(),
-        }
+    let ksuid = Ksuid::from_base62(ksuid).map_err(|_err| MgmtProtocolError {
+        recoverable: true,
+        message: "destroy-session first argument: invalid ksuid".into(),
     })?;
 
     Ok(ksuid)
@@ -56,26 +54,21 @@ impl FromStr for AsciiManagerRequest {
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         let mut parts = value.split_whitespace();
-        let command = parts.next()
-            .ok_or_else(|| {
-                MgmtProtocolError {
-                    recoverable: true,
-                    message: format!("unknown command: {}", value),
-                }
-            })?;
+        let command = parts.next().ok_or_else(|| MgmtProtocolError {
+            recoverable: true,
+            message: format!("unknown command: {}", value),
+        })?;
 
         match command {
             "print-active-sessions" => Ok(AsciiManagerRequest::PrintActiveSessions),
             "destroy-session" => {
-                destroy_session_from_str_iter(parts)
-                    .map(AsciiManagerRequest::DestroySession)
+                destroy_session_from_str_iter(parts).map(AsciiManagerRequest::DestroySession)
             }
-            _ => {
-                Err(MgmtProtocolError {
-                    recoverable: true,
-                    message: format!("unknown command: {}", value),
-                }.into())
+            _ => Err(MgmtProtocolError {
+                recoverable: true,
+                message: format!("unknown command: {}", value),
             }
+            .into()),
         }
     }
 }
@@ -119,7 +112,11 @@ where
     if let Some(ref bcl) = si.backend_connect_latency {
         write!(wri, "backend_connect_latency_ms={} ", bcl.as_millis())?;
     }
-    write!(wri, "session_age_ms={} ", si.start_time.elapsed().as_millis())?;
+    write!(
+        wri,
+        "session_age_ms={} ",
+        si.start_time.elapsed().as_millis()
+    )?;
     write!(
         wri,
         "last_xmit_ago_ms={} ",
@@ -175,7 +172,7 @@ impl Encoder for AsciiManagerServer {
             AsciiManagerResponse::GenericOk => {
                 dst.extend_from_slice(b"OK\n");
             }
-            AsciiManagerResponse::GenericError =>  {
+            AsciiManagerResponse::GenericError => {
                 dst.extend_from_slice(b"ERROR\n");
             }
         }
@@ -199,20 +196,18 @@ impl Decoder for AsciiManagerServer {
                     return Err(MgmtProtocolError {
                         recoverable: false,
                         message: "line too long - connection terminated".to_string(),
-                    }.into());
+                    }
+                    .into());
                 }
 
                 return Ok(None);
             }
         };
 
-        let mut line = from_utf8(&*line)
-            .map_err(|e| {
-                MgmtProtocolError {
-                    recoverable: false,
-                    message: format!("could not process line: {}", e),
-                }
-            })?;
+        let mut line = from_utf8(&*line).map_err(|e| MgmtProtocolError {
+            recoverable: false,
+            message: format!("could not process line: {}", e),
+        })?;
 
         line = line.trim();
         AsciiManagerRequest::from_str(line).map(Some)
@@ -235,19 +230,20 @@ where
     Box::new(fut)
 }
 
-fn handle_query(sessman: &Mutex<SessionManager>, req: AsciiManagerRequest) -> Result<AsciiManagerResponse, Error> {
+fn handle_query(
+    sessman: &Mutex<SessionManager>,
+    req: AsciiManagerRequest,
+) -> Result<AsciiManagerResponse, Error> {
     let mut sessions = sessman.lock().unwrap();
     match req {
         AsciiManagerRequest::PrintActiveSessions => {
             let sessions = sessions.get_sessions();
             Ok(AsciiManagerResponse::PrintActive(sessions))
         }
-        AsciiManagerRequest::DestroySession(ref sess_id) => {
-            match sessions.destroy(sess_id) {
-                Ok(()) => Ok(AsciiManagerResponse::GenericOk),
-                Err(()) => Ok(AsciiManagerResponse::GenericError),
-            }
-        }
+        AsciiManagerRequest::DestroySession(ref sess_id) => match sessions.destroy(sess_id) {
+            Ok(()) => Ok(AsciiManagerResponse::GenericOk),
+            Err(()) => Ok(AsciiManagerResponse::GenericError),
+        },
     }
 }
 
@@ -264,9 +260,7 @@ where
     if let Some(req) = req {
         match handle_query(&sessman, req) {
             Ok(resp) => {
-                let fut = sink
-                    .send(resp)
-                    .map(move |_sink| ());
+                let fut = sink.send(resp).map(move |_sink| ());
                 Box::new(fut)
             }
             Err(err) => {

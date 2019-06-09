@@ -1,12 +1,12 @@
 use std::collections::BTreeMap;
 use std::collections::HashMap;
-use std::time::{Duration, Instant};
-use std::mem;
 use std::error::Error as StdError;
+use std::mem;
+use std::time::{Duration, Instant};
 
-use futures::future::{empty, abortable, Empty, Shared, Abortable, AbortHandle, FutureExt};
-use log::{debug, warn, info};
+use futures::future::{abortable, empty, AbortHandle, Abortable, Empty, FutureExt, Shared};
 use ksuid::Ksuid;
+use log::{debug, info, warn};
 
 use crate::sni::SocketAddrPair;
 
@@ -29,14 +29,20 @@ pub struct SessionCreateCommand {
 pub type SessionAbortFuture = Shared<Abortable<Empty<()>>>;
 
 impl SessionCreateCommand {
-    pub fn new(start_time: Instant, client_conn: SocketAddrPair) -> (SessionCreateCommand, SessionAbortFuture) {
+    pub fn new(
+        start_time: Instant,
+        client_conn: SocketAddrPair,
+    ) -> (SessionCreateCommand, SessionAbortFuture) {
         let (abort_future, abort_handle) = abortable(empty());
 
-        (SessionCreateCommand {
-            start_time,
-            client_conn,
-            abort_handle,
-        }, abort_future.shared())
+        (
+            SessionCreateCommand {
+                start_time,
+                client_conn,
+                abort_handle,
+            },
+            abort_future.shared(),
+        )
     }
 }
 
@@ -111,7 +117,7 @@ impl Session {
                 last_xmit: Instant::now(),
                 bytes_client_to_backend: 0,
                 bytes_backend_to_client: 0,
-            }
+            },
         }
     }
 }
@@ -152,15 +158,18 @@ impl SessionManager {
     }
 
     pub fn get_sessions(&self) -> Vec<SessionExport> {
-        self.sessions.values().map(SessionExport::from_session).collect()
+        self.sessions
+            .values()
+            .map(SessionExport::from_session)
+            .collect()
     }
 
     pub fn apply_command(&mut self, cmd: SessionCommand) {
         self.cleanup();
 
         if let SessionCommandData::Create(creat) = cmd.data {
-            self.sessions.insert(cmd.session_id,
-                Session::new(cmd.session_id, creat));
+            self.sessions
+                .insert(cmd.session_id, Session::new(cmd.session_id, creat));
             return;
         }
 
@@ -173,7 +182,7 @@ impl SessionManager {
             SessionCommandData::Destroy => {
                 //
             }
-            
+
             SessionCommandData::BackendConnecting(ref backend_name) => {
                 state_change = true;
                 inst.exportable.state = SessionState::BackendConnecting;
@@ -216,7 +225,7 @@ impl SessionManager {
 
         if inst.exportable.state == SessionState::Shutdown {
             debug!("scheduling removal of {}", cmd.session_id.fmt_base62());
-            
+
             let key = (Instant::now() + Duration::new(30, 0), self.tie_break_ctr);
             self.tie_break_ctr += 1;
             self.tie_break_ctr &= 0x7FFF_FFFF;
@@ -226,7 +235,12 @@ impl SessionManager {
         }
 
         if state_change {
-            info!("{} {:?} -> {:?}", cmd.session_id.fmt_base62(), pre_state, inst.exportable.state);
+            info!(
+                "{} {:?} -> {:?}",
+                cmd.session_id.fmt_base62(),
+                pre_state,
+                inst.exportable.state
+            );
         }
     }
 }
