@@ -10,7 +10,7 @@ use bytes::{Bytes, BytesMut};
 use copy_arena::Arena;
 use futures01::prelude::{Future as LegacyFuture};
 use futures::compat::{Compat01As03, Compat01As03Sink};
-use futures::future;
+use futures::future::{self, Either, select, Aborted};
 use futures::prelude::{Sink, SinkExt, Stream, StreamExt};
 use ksuid::Ksuid;
 use log::{debug, info, warn};
@@ -21,13 +21,14 @@ use tokio::prelude::stream::{SplitStream, SplitSink};
 use tokio::sync::mpsc::Sender;
 
 
+
 use tls::{
     extract_record, ByteIterRead, ClientHello, Extension, ExtensionServerName, Handshake,
     RECORD_CONTENT_TYPE_HANDSHAKE,
 };
 
 use crate::config::Resolver;
-use crate::state_track::{SessionCommand, SessionCommandData};
+use crate::state_track::{SessionAbortFuture, SessionCommand, SessionCommandData};
 
 const DEFAULT_SNI_DETECTOR_MAX_LEN: usize = 20480;
 
@@ -38,7 +39,7 @@ pub const ALERT_UNRECOGNIZED_NAME: AlertError = AlertError {
     alert_description: 112,
 };
 
-
+#[derive(Debug)]
 enum Direction {
     BackendToClient,
     ClientToBackend,
@@ -57,6 +58,7 @@ impl fmt::Display for AlertError {
     }
 }
 
+#[derive(Debug)]
 pub enum SniDetectRecord {
     SniHostname(String),
     PassThrough(Bytes),
@@ -305,18 +307,7 @@ pub struct ClientMetadata {
     pub client_conn: SocketAddrPair,
     pub stats_tx_impl: Sender<SessionCommand>,
     pub stats_tx: Compat01As03Sink<Sender<SessionCommand>, SessionCommand>,
-}
-
-impl Clone for ClientMetadata {
-    fn clone(&self) -> Self {
-        ClientMetadata {
-            session_id: self.session_id,
-            start_time: self.start_time,
-            client_conn: self.client_conn.clone(),
-            stats_tx_impl: self.stats_tx_impl.clone(),
-            stats_tx: Compat01As03Sink::new(self.stats_tx_impl.clone()),
-        }
-    }
+    pub aborter: SessionAbortFuture,
 }
 
 pub async fn start_client<A>(
@@ -329,9 +320,13 @@ where
 {
     use futures01::prelude::Stream;
 
+    let mut stats_tx = Compat01As03Sink::new(client_meta.stats_tx_impl.clone());
+    let client_meta_session_id = client_meta.session_id;
+    let hanshake_client_meta_client_conn = client_meta.client_conn.peer_addr();
+
     info!(
         "{}: started connection from {}",
-        client_meta.session_id.fmt_base62(),
+        client_meta_session_id.fmt_base62(),
         client_meta.client_conn.peer_addr()
     );
 
@@ -369,7 +364,7 @@ where
         }
     }
 
-    let hanshake_client_meta = client_meta.clone();
+    
     let client_fut = client_stream
         .into_future()
         .timeout(Duration::from_secs(3))
@@ -377,13 +372,13 @@ where
             if let Some((inner, _stream)) = e.into_inner() {
                 warn!(
                     "error with ClientHello for {}: {}",
-                    hanshake_client_meta.client_conn.peer_addr(),
+                    hanshake_client_meta_client_conn,
                     inner
                 );
             } else {
                 warn!(
                     "{} failed to send ClientHello within allotted time",
-                    hanshake_client_meta.client_conn.peer_addr()
+                    hanshake_client_meta_client_conn
                 );
             }
         });
@@ -403,15 +398,15 @@ where
     }
 
     let client_stream = Compat01As03::new(client_stream_tail);
-    // if !connector.use_haproxy_header(&hostname) {
-    //     // clears the whole thing.
-    //     proxy_buf.take();
-    // }
-    let result = connect_hostname(client_meta.clone(), connector, hostname, proxy_buf.freeze(), client_sink, client_stream).await;
+    if !connector.use_haproxy_header(&hostname) {
+        // clears the whole thing.
+        proxy_buf.take();
+    }
+    let result = connect_hostname(client_meta, connector, hostname, proxy_buf.freeze(), client_sink, client_stream).await;
 
-    client_meta.stats_tx
+    stats_tx
         .send(SessionCommand {
-            session_id: client_meta.session_id,
+            session_id: client_meta_session_id,
             data: SessionCommandData::Destroy,
         }).await.map_err(|e| {
             io::Error::new(io::ErrorKind::Other, e)
@@ -422,7 +417,9 @@ where
 
 #[allow(clippy::needless_lifetimes)]
 async fn unidirectional_copy<Si, St>(
-    mut client_meta: ClientMetadata,
+    session_id: Ksuid,
+    mut stats_tx: Compat01As03Sink<Sender<SessionCommand>, SessionCommand>,
+    aborter: SessionAbortFuture,
     mut sink: Si,
     mut stream: St,
     direction: Direction,
@@ -433,7 +430,15 @@ where
     Si::SinkError: std::error::Error + Sync + Send + 'static,
 {
     loop {
-        let (stream_next, stream_tail) = stream.into_future().await;
+        let stream_fut = stream.into_future();
+        let (stream_next, stream_tail) = match select(aborter.clone(), stream_fut).await {
+            Either::Left((Ok(()), _)) => unreachable!(),
+            Either::Left((Err(Aborted), _)) => {
+                debug!("{} {:?} aborted", session_id.fmt_base62(), direction);
+                break;
+            }
+            Either::Right((pair, _)) => pair,
+        };
         stream = stream_tail;
         match stream_next {
             Some(rec) => {
@@ -448,8 +453,8 @@ where
                     Direction::ClientToBackend => SessionCommandData::XmitClientToBackend(bytes),
                 };
 
-                client_meta.stats_tx.send(SessionCommand {
-                    session_id: client_meta.session_id,
+                stats_tx.send(SessionCommand {
+                    session_id,
                     data,
                 }).await.map_err(|e| {
                     io::Error::new(io::ErrorKind::Other, e)
@@ -465,32 +470,33 @@ where
                     err
                 })?;
             }
-            None => break,
+            None => {
+                debug!("{} {:?} stream-fin", session_id.fmt_base62(), direction);
+                break;
+            }
         }
     }
 
-    warn!("closing sink!");
     sink.close().await.map_err(|e| {
         io::Error::new(io::ErrorKind::Other, e)
     })?;
-    warn!("closed sink!");
     drop(sink);
 
     let sess_cmd = SessionCommand {
-        session_id: client_meta.session_id,
+        session_id,
         data: match direction {
             Direction::BackendToClient => SessionCommandData::ShutdownRead,
             Direction::ClientToBackend => SessionCommandData::ShutdownWrite,
         },
     };
-    client_meta.stats_tx.send(sess_cmd).await.map_err(|e| {
+    stats_tx.send(sess_cmd).await.map_err(|e| {
         io::Error::new(io::ErrorKind::Other, e)
     })?;
     Ok(())
 }
 
 pub async fn bidirectional_copy<A, B>(
-    meta: ClientMetadata,
+    client_meta: ClientMetadata,
     client_stream: Compat01As03<SplitStream<Framed<A, SniDetectorCodec>>>,
     client_sink: Compat01As03Sink<SplitSink<Framed<A, SniDetectorCodec>>, SniDetectRecord>,
     server_stream: Compat01As03<SplitStream<Framed<B, SniPassCodec>>>,
@@ -500,12 +506,14 @@ where
     A: AsyncRead + AsyncWrite + Send + 'static,
     B: AsyncRead + AsyncWrite + Send + 'static,
 {
+    let s2c_stats_tx = Compat01As03Sink::new(client_meta.stats_tx_impl.clone());
+    let c2s_stats_tx = Compat01As03Sink::new(client_meta.stats_tx_impl.clone());
     let server_to_client = unidirectional_copy(
-        meta.clone(), client_sink, server_stream,
+        client_meta.session_id, s2c_stats_tx, client_meta.aborter.clone(), client_sink, server_stream,
         Direction::BackendToClient);
 
     let client_to_server = unidirectional_copy(
-        meta.clone(), server_sink, client_stream,
+        client_meta.session_id, c2s_stats_tx, client_meta.aborter, server_sink, client_stream,
         Direction::ClientToBackend);
 
     let (s2c, c2s) = future::join(
@@ -539,7 +547,15 @@ where
 {
     use futures01::stream::Stream;
 
-    let client_meta_copy = client_meta.clone();
+    let client_meta_session_id = client_meta.session_id;
+
+    client_meta.stats_tx.send(SessionCommand {
+        session_id: client_meta.session_id,
+        data: SessionCommandData::BackendConnecting(hostname.clone()),
+    }).await.map_err(|e| {
+        io::Error::new(io::ErrorKind::Other, e)
+    })?;
+
     let stream_fut = resolver.resolve(&hostname)
         .timeout(Duration::from_secs(3))
         .map_err(move |e| {
@@ -548,7 +564,7 @@ where
             } else {
                 warn!(
                     "{}: failed to connect to backend within allotted time",
-                    client_meta_copy.session_id.fmt_base62(),
+                    client_meta_session_id.fmt_base62(),
                 );
                 io::Error::new(io::ErrorKind::Other, "backend connection timeout")
             }
@@ -557,7 +573,7 @@ where
     let (sockaddr_pair, socket) = Compat01As03::new(stream_fut).await?;
     info!(
         "{}: connected to backend after {}ms",
-        client_meta.session_id.fmt_base62(),
+        client_meta_session_id.fmt_base62(),
         duration_milliseconds(client_meta.start_time.elapsed())
     );
 
@@ -566,20 +582,16 @@ where
     let backend_stream = Compat01As03::new(backend_stream);
 
     if let Some(pair) = sockaddr_pair {
-        warn!("{} connection", client_meta.session_id.fmt_base62());
+        warn!("{} connection", client_meta_session_id.fmt_base62());
         let send_res = client_meta.stats_tx.send(SessionCommand {
-            session_id: client_meta.session_id,
-            data: SessionCommandData::Connected(
-                hostname,
-                pair,
-                client_meta.start_time.elapsed(),
-            ),
+            session_id: client_meta_session_id,
+            data: SessionCommandData::Connected(pair),
         }).await;
 
         if let Err(err) = send_res {
             info!(
                 "{}: failed to send to stats collector: {}",
-                client_meta.session_id.fmt_base62(),
+                client_meta_session_id.fmt_base62(),
                 err,
             );
 
@@ -591,7 +603,7 @@ where
         io::Error::new(io::ErrorKind::Other, e)
     })?;
     
-    bidirectional_copy(client_meta.clone(),
+    bidirectional_copy(client_meta,
         client_stream, client_sink, backend_stream, backend_sink).await?;
 
     Ok(())

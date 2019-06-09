@@ -4,13 +4,13 @@ use std::sync::{Arc, Mutex};
 
 use bytes::BytesMut;
 use failure::{Error, Fail};
-
+use ksuid::Ksuid;
 use tokio::codec::{Decoder, Encoder, Framed};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::prelude::{future, Future, Sink, Stream};
 
 use crate::sni::SocketAddrPair;
-use crate::state_track::{Session, SessionManager};
+use crate::state_track::{SessionExport, SessionManager};
 
 #[derive(Debug, Fail)]
 #[fail(display = "protocol error")]
@@ -29,26 +29,61 @@ impl AsciiManagerServer {
 
 pub enum AsciiManagerRequest {
     PrintActiveSessions,
+    DestroySession(Ksuid),
+}
+
+fn destroy_session_from_str_iter<'a, I>(mut parts: I) -> Result<Ksuid, Error> where I: Iterator<Item=&'a str> {
+    let ksuid = parts.next()
+        .ok_or_else(|| {
+            MgmtProtocolError {
+                recoverable: true,
+                message: "destroy-session takes one argument (a ksuid)".into(),
+            }
+        })?;
+
+    let ksuid = Ksuid::from_base62(ksuid).map_err(|_err| {
+        MgmtProtocolError {
+            recoverable: true,
+            message: "destroy-session first argument: invalid ksuid".into(),
+        }
+    })?;
+
+    Ok(ksuid)
 }
 
 impl FromStr for AsciiManagerRequest {
     type Err = Error;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
-        Ok(match value {
-            "print-active-sessions" => AsciiManagerRequest::PrintActiveSessions,
-            _ => {
-                return Err(MgmtProtocolError {
+        let mut parts = value.split_whitespace();
+        let command = parts.next()
+            .ok_or_else(|| {
+                MgmtProtocolError {
                     recoverable: true,
                     message: format!("unknown command: {}", value),
-                }.into());
+                }
+            })?;
+
+        match command {
+            "print-active-sessions" => Ok(AsciiManagerRequest::PrintActiveSessions),
+            "destroy-session" => {
+                destroy_session_from_str_iter(parts)
+                    .map(AsciiManagerRequest::DestroySession)
             }
-        })
+            _ => {
+                Err(MgmtProtocolError {
+                    recoverable: true,
+                    message: format!("unknown command: {}", value),
+                }.into())
+            }
+        }
     }
 }
 
 pub enum AsciiManagerResponse {
-    PrintActive(Vec<Session>),
+    PrintActive(Vec<SessionExport>),
+    GenericOk,
+    GenericError,
 }
 
 fn write_sock_addr_pair<W>(wri: &mut W, sap: &SocketAddrPair) -> io::Result<()>
@@ -68,7 +103,7 @@ where
     Ok(())
 }
 
-fn write_session_info<W>(wri: &mut W, si: &Session) -> io::Result<()>
+fn write_session_info<W>(wri: &mut W, si: &SessionExport) -> io::Result<()>
 where
     W: std::io::Write,
 {
@@ -109,7 +144,7 @@ where
 fn encode_print_active_sessions(
     scratch: &mut [u8],
     out: &mut BytesMut,
-    sess_infos: &[Session],
+    sess_infos: &[SessionExport],
 ) -> io::Result<()> {
     for si in sess_infos {
         let cur_pos = {
@@ -136,6 +171,12 @@ impl Encoder for AsciiManagerServer {
         match item {
             AsciiManagerResponse::PrintActive(ref sessinfo) => {
                 encode_print_active_sessions(&mut scratch, dst, sessinfo)?;
+            }
+            AsciiManagerResponse::GenericOk => {
+                dst.extend_from_slice(b"OK\n");
+            }
+            AsciiManagerResponse::GenericError =>  {
+                dst.extend_from_slice(b"ERROR\n");
             }
         }
 
@@ -194,6 +235,22 @@ where
     Box::new(fut)
 }
 
+fn handle_query(sessman: &Mutex<SessionManager>, req: AsciiManagerRequest) -> Result<AsciiManagerResponse, Error> {
+    let mut sessions = sessman.lock().unwrap();
+    match req {
+        AsciiManagerRequest::PrintActiveSessions => {
+            let sessions = sessions.get_sessions();
+            Ok(AsciiManagerResponse::PrintActive(sessions))
+        }
+        AsciiManagerRequest::DestroySession(ref sess_id) => {
+            match sessions.destroy(sess_id) {
+                Ok(()) => Ok(AsciiManagerResponse::GenericOk),
+                Err(()) => Ok(AsciiManagerResponse::GenericError),
+            }
+        }
+    }
+}
+
 fn recursive_handle<St, Si>(
     sessman: Arc<Mutex<SessionManager>>,
     _stream: St,
@@ -204,12 +261,21 @@ where
     St: Stream<Item = AsciiManagerRequest, Error = Error> + Send + Sync + 'static,
     Si: Sink<SinkItem = AsciiManagerResponse, SinkError = Error> + Send + Sync + 'static,
 {
-    let sessions = sessman.lock().unwrap().get_sessions();
-    if let Some(_req) = req {
-        let fut = sink
-            .send(AsciiManagerResponse::PrintActive(sessions))
-            .map(move |_sink| ());
-        Box::new(fut)
+    if let Some(req) = req {
+        match handle_query(&sessman, req) {
+            Ok(resp) => {
+                let fut = sink
+                    .send(resp)
+                    .map(move |_sink| ());
+                Box::new(fut)
+            }
+            Err(err) => {
+                let fut = sink
+                    .send(AsciiManagerResponse::GenericError)
+                    .map(move |_sink| ());
+                Box::new(fut)
+            }
+        }
     } else {
         Box::new(future::ok(()))
     }

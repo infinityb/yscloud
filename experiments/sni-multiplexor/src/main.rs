@@ -159,7 +159,7 @@ fn main() {
     let sessman_stats = Arc::clone(&sessman);
     let stats_gather = stats_rx.for_each(move |cmd| {
         let mut sessman = sessman_stats.lock().unwrap();
-        sessman.apply_command(&cmd);
+        sessman.apply_command(cmd);
         Ok(())
     }).map_err(|e| info!("stats receiver died: {}", e));
 
@@ -189,12 +189,11 @@ fn main() {
                 let client_conn = SocketAddrPair::from_pair(socket.local_addr()?, socket.peer_addr()?)?;
                 let mut stats_tx = Compat01As03Sink::new(stats_tx_impl.clone());
 
+                let (creat, aborter) = SessionCreateCommand::new(start_time, client_conn.clone());
+
                 stats_tx.send(SessionCommand {
                     session_id,
-                    data: SessionCommandData::Create(SessionCreateCommand {
-                        start_time,
-                        client_conn: client_conn.clone(),
-                    })
+                    data: SessionCommandData::Create(creat),
                 }).await.map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
 
                 let client_meta = ClientMetadata {
@@ -203,6 +202,7 @@ fn main() {
                     client_conn,
                     stats_tx_impl,
                     stats_tx,
+                    aborter,
                 };
                 let resolver = server_resolver.lock().unwrap().clone();
                 let framed = SniDetectorCodec::new(session_id).framed(socket);

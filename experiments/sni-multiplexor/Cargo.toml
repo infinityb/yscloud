@@ -20,3 +20,4 @@ tokio = { version = "0.1.20" }
 uuid = { version = "0.6", features = ["v4", "serde", "const_fn"] }
 futures-preview = { version = "=0.3.0-alpha.16", features = ["compat"] }
 futures01 = { package = "futures", version = "0.1" }
+failure = "0.1.5"
