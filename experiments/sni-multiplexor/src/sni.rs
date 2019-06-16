@@ -342,10 +342,10 @@ where
             write!(
                 &mut proxy_buf,
                 "PROXY TCP4 {} {} {} {}\r\n",
-                v4.local_addr.ip(),
                 v4.peer_addr.ip(),
-                v4.local_addr.port(),
+                v4.local_addr.ip(),
                 v4.peer_addr.port(),
+                v4.local_addr.port(),
             )
             .unwrap();
         }
@@ -353,10 +353,10 @@ where
             write!(
                 &mut proxy_buf,
                 "PROXY TCP6 {} {} {} {}\r\n",
-                v6.local_addr.ip(),
                 v6.peer_addr.ip(),
-                v6.local_addr.port(),
+                v6.local_addr.ip(),
                 v6.peer_addr.port(),
+                v6.local_addr.port(),
             )
             .unwrap();
         }
