@@ -14,6 +14,8 @@ pub struct DeploymentManifest {
     pub deployment_name: String,
     pub public_services: Vec<DeployedPublicService>,
     pub components: Vec<DeployedApplicationManifest>,
+    #[serde(default="Default::default")]
+    pub path_overrides: HashMap<String, String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

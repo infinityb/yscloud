@@ -39,7 +39,7 @@ use uuid::Uuid;
 mod artifact;
 pub mod platform;
 
-pub use self::artifact::find_artifact;
+pub use self::artifact::{find_artifact, load_artifact};
 pub use self::platform::{exec_artifact, ExecExtras, ExecExtrasBuilder, Executable};
 
 fn json_assert_object(v: serde_json::Value) -> serde_json::Map<String, serde_json::Value> {
@@ -112,7 +112,7 @@ fn demo() {
     fn generate_deployment(
         registry: &HashMap<String, Vec<ApplicationManifest>>,
         options: &DeploymentOptions,
-    ) -> Result<DeploymentManifest, Box<StdError>> {
+    ) -> Result<DeploymentManifest, Box<dyn StdError>> {
         // let services: Vec<ApplicationManifest> = Vec::new();
 
         let mut apps = HashMap::<&str, &ApplicationManifest>::new();
@@ -173,6 +173,7 @@ fn demo() {
             deployment_name: options.deployment_name.clone(),
             public_services: deployed_public_services,
             components,
+            path_overrides: HashMap::new(),
         })
     }
 
@@ -282,6 +283,7 @@ fn demo() {
                 extras: Default::default(),
             },
         ],
+        path_overrides: HashMap::new(),
     };
 
     let x = serde_json::to_string_pretty(&target_deployment_manifest).unwrap();
@@ -359,6 +361,14 @@ fn main() {
                 .value_name("DIR")
                 .help("an artifact directory containing dependencies of the manifest")
                 .required(true)
+                .takes_value(true),
+        )
+        .arg(
+            Arg::with_name("artifact-override")
+                .long("artifact-override")
+                .value_name("PACKAGE_ID:PATH")
+                .help("Override a Package ID with some other path")
+                .multiple(true)
                 .takes_value(true),
         );
 
@@ -507,6 +517,7 @@ fn sfshost_deployment_manifest() -> DeploymentManifest {
                 extras: Default::default(),
             },
         ],
+        path_overrides: HashMap::new(),
     }
 }
 
@@ -575,6 +586,7 @@ fn staticserver_deployment_manifest() -> DeploymentManifest {
                 extras: Default::default(),
             },
         ],
+        path_overrides: HashMap::new(),
     }
 }
 
@@ -611,8 +623,21 @@ fn main_run(matches: &clap::ArgMatches) {
     let manifest_path = matches.value_of("manifest").unwrap();
     trace!("got manifest: {:?}", manifest_path);
 
+    let mut overrides: HashMap<String, String> = HashMap::new();
+    if let Some(override_args) = matches.values_of_lossy("artifact-override") {
+        for arg in override_args {
+            let mut split_iter = arg.split(':');
+            let package_name = split_iter.next().unwrap().to_string();
+            let artifact_path = split_iter.next().unwrap().to_string();
+            overrides.insert(package_name, artifact_path);
+        }
+
+        warn!("development mode - using path overrides: {:?}", overrides);
+    }
+
     let rdr = File::open(&manifest_path).unwrap();
-    let target_deployment_manifest = serde_json::from_reader::<_, DeploymentManifest>(rdr).unwrap();
+    let mut target_deployment_manifest = serde_json::from_reader::<_, DeploymentManifest>(rdr).unwrap();
+    target_deployment_manifest.path_overrides = overrides;
 
     let reified =
         reify_service_connections(&target_deployment_manifest, artifacts, &approot).unwrap();
@@ -812,13 +837,19 @@ fn reify_service_connections(
     dm: &DeploymentManifest,
     artifact_path: &str,
     approot: &Path,
-) -> Result<Vec<ExecSomething>, Box<StdError>> {
+) -> Result<Vec<ExecSomething>, Box<dyn StdError>> {
     let mut instances = HashMap::<Uuid, ExecSomething>::new();
     let mut instance_components = HashMap::<Uuid, &DeployedApplicationManifest>::new();
     let mut instance_by_package = HashMap::<&str, Uuid>::new();
 
     for component in &dm.components {
-        let artifact = find_artifact(artifact_path, &component.package_id, &component.version)?;
+        let artifact =
+            if let Some(path) = dm.path_overrides.get(&component.package_id) {
+                warn!("because of override, trying to find package {:?} @ {}", component.package_id, path);
+                load_artifact(&path)?
+            } else {
+                find_artifact(artifact_path, &component.package_id, &component.version)?
+            };
 
         let instance_id = Uuid::new_v4();
 
@@ -939,7 +970,7 @@ fn reify_service_connections(
 }
 
 #[allow(dead_code)]
-fn mvp_deployment() -> Result<(), Box<StdError>> {
+fn mvp_deployment() -> Result<(), Box<dyn StdError>> {
     let mvp_deployment_manifest = DeploymentManifest {
         deployment_name: "aibi.yshi.org".into(),
         public_services: vec![
@@ -981,6 +1012,7 @@ fn mvp_deployment() -> Result<(), Box<StdError>> {
             required_local_services: vec![],
             extras: Default::default(),
         }],
+        path_overrides: HashMap::new(),
     };
 
     // checks(&mvp_deployment_manifest).unwrap();
