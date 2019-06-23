@@ -53,6 +53,19 @@ def get_sessions(path):
     return sessions
 
 
+def destroy_session(path, session_id):
+    subproc = subprocess.Popen(
+        ['/bin/nc', '-U', path],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE)
+    try:
+        subproc.stdin.write("destroy-session {}\n".format(session_id))
+        subproc.stdin.close()
+        response = subproc.stdout.read()
+    finally:
+        subproc.wait()
+
+
 class Session(object):
     def __init__(self):
         self.session_id = None
@@ -72,18 +85,18 @@ def print_session(sess):
     (local_bind, client_ip) = sess.local_sock_info.split(',', 1)
     print("{:28} {:16} {:15} {:15} {:20} {}".format(sess.session_id, sess.state, sess.session_age, sess.last_xmit_ago, sess.backend, client_ip))
 
+
 def main():
-    print("{:28} {:16} {:15} {:15} {:20} {}".format("session_id", "state", "session_age", "last_xmit_ago", "backend", "client ip"))
-    for sess in sorted_from_expr(get_sessions('/var/run/sni-multiplexor-mgmt'), sys.argv[1]):
-        print_session(sess)
+    sessions = get_sessions('/var/run/sni-multiplexor-mgmt')
+    for sess in sessions:
+        if sess.state == 'shutdown-write' and timedelta(minutes=10) < sess.last_xmit_ago:
+            print_session(sess)
+            destroy_session('/var/run/sni-multiplexor-mgmt', sess.session_id)
+    for sess in sessions:
+        if sess.state == 'connected' and timedelta(hours=1) < sess.last_xmit_ago:
+            print_session(sess)
+            destroy_session('/var/run/sni-multiplexor-mgmt', sess.session_id)
 
-
-def sorted_from_expr(v, expr):
-    should_reverse=False
-    if expr.startswith('-'):
-        expr = expr[1:]
-        should_reverse = True
-    return sorted(v, key=attrgetter(expr), reverse=should_reverse)
 
 if __name__ == '__main__':
     main()

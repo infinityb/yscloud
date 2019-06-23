@@ -8,6 +8,12 @@ use uuid::Uuid;
 
 pub mod permissions;
 
+#[derive(Serialize, Deserialize, Clone, Copy, Debug)]
+#[serde(rename_all = "snake_case")]
+pub enum SocketFlag {
+    BehindHaproxy,
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct DeploymentManifest {
@@ -76,6 +82,8 @@ pub struct UnixDomainBinder {
     pub path: PathBuf,
     #[serde(default="start_listen_default")]
     pub start_listen: bool,
+    #[serde(default="Default::default")]
+    pub flags: Vec<SocketFlag>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -85,6 +93,8 @@ pub struct NativePortBinder {
     pub port: u16,
     #[serde(default="start_listen_default")]
     pub start_listen: bool,
+    #[serde(default="Default::default")]
+    pub flags: Vec<SocketFlag>,
 }
 
 // #[cfg(feature = "sni-binder")]
@@ -102,6 +112,8 @@ fn start_listen_default() -> bool {
 #[serde(rename_all = "snake_case")]
 pub struct WebServiceBinder {
     pub hostname: String,
+    #[serde(default="Default::default")]
+    pub flags: Vec<SocketFlag>,
 }
 
 #[derive(Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash, Clone, Debug)]
@@ -183,6 +195,7 @@ pub struct SideCarServiceInfo {
 pub struct SocketInfo {
     pub mode: SocketMode,
     pub protocol: Protocol,
+    pub flags: Vec<SocketFlag>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

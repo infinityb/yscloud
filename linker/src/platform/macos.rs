@@ -105,9 +105,10 @@ fn exec_artifact_child(_e: &ExecExtras, c: AppPreforkConfiguration) -> io::Resul
     use nix::sys::stat::Mode;
 
     let package_id = c.package_id.clone();
+
     let app_config = relabel_file_descriptors(&c)?;
 
-    let path = format!("/tmp/yscloud-{}", thread_rng().gen::<u64>());
+    let path = format!("/tmp/yscloud-{}-{}", c.instance_id, thread_rng().gen::<u64>());
     let tmpfile = open(
         &path as &str,
         OFlag::O_CREAT | OFlag::O_RDWR,
@@ -115,7 +116,9 @@ fn exec_artifact_child(_e: &ExecExtras, c: AppPreforkConfiguration) -> io::Resul
     )
     .map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
 
-    unlink(&path as &str).map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
+    if let Err(err) = unlink(&path as &str) {
+        warn!("failed to unlink temporary file {}: {}", path, err);
+    }
 
     let data = serde_json::to_string(&app_config)?;
     let data_len =

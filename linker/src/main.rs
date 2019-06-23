@@ -185,6 +185,7 @@ fn demo() {
                 service_name: "org.yshi.sfshost.https".into(),
                 binder: PublicServiceBinder::WebServiceBinder(WebServiceBinder {
                     hostname: "shortfiles.staceyell.com".into(),
+                    flags: Vec::new(),
                 }),
             }],
             service_mapping: {
@@ -222,6 +223,7 @@ fn demo() {
             },
             binder: PublicServiceBinder::WebServiceBinder(WebServiceBinder {
                 hostname: "shortfiles.staceyell.com".into(),
+                flags: Vec::new(),
             }),
         }],
         components: vec![
@@ -458,6 +460,7 @@ fn sfshost_deployment_manifest() -> DeploymentManifest {
                 bind_address: "::".into(),
                 port: 1443,
                 start_listen: true,
+                flags: Vec::new(),
             }),
         }],
         components: vec![
@@ -533,6 +536,7 @@ fn staticserver_deployment_manifest() -> DeploymentManifest {
                 binder: PublicServiceBinder::UnixDomainBinder(UnixDomainBinder {
                     path: Path::new("/var/run/https.staceyell.com").into(),
                     start_listen: true,
+                    flags: Vec::new(),
                 }),
             },
             DeployedPublicService {
@@ -543,6 +547,7 @@ fn staticserver_deployment_manifest() -> DeploymentManifest {
                 binder: PublicServiceBinder::UnixDomainBinder(UnixDomainBinder {
                     path: Path::new("/var/run/http.staceyell.com").into(),
                     start_listen: true,
+                    flags: Vec::new(),
                 }),
             },
         ],
@@ -642,7 +647,7 @@ fn main_run(matches: &clap::ArgMatches) {
     let reified =
         reify_service_connections(&target_deployment_manifest, artifacts, &approot).unwrap();
 
-    #[derive(Clone)]
+    #[derive(Clone, Debug)]
     struct ChildInfo {
         package_name: String,
         sent_kill: Arc<AtomicBool>,
@@ -673,8 +678,9 @@ fn main_run(matches: &clap::ArgMatches) {
                 if !second_kill {
                     info.sent_kill.store(true, Ordering::SeqCst);
                 }
-                info!("sending {} ({}) SIGINT", pid, info.package_name);
-                let _ = kill(*pid, Signal::SIGINT);
+                info!("sending {} ({}) SIGTERM", pid, info.package_name);
+                let sent_kill = kill(*pid, Signal::SIGTERM).is_ok();
+                info!("sent {} ({}) SIGTERM, successful: {}", pid, info.package_name, sent_kill);
             }
         }
     }
@@ -800,7 +806,8 @@ fn bind_unix_socket(ub: &UnixDomainBinder) -> io::Result<OwnedFd> {
     }
 
     if ub.start_listen {
-        ::nix::sys::socket::listen(fd.as_raw_fd(), 10)
+        // 128 from rust stdlib
+        ::nix::sys::socket::listen(fd.as_raw_fd(), 128)
             .map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
     }
 
@@ -914,6 +921,11 @@ fn reify_service_connections(
             remote: FileDescriptorRemote::Socket(SocketInfo {
                 mode: SocketMode::Listening,
                 protocol: Protocol::Stream,
+                flags: match ps.binder {
+                    PublicServiceBinder::NativePortBinder(ref np) => np.flags.clone(),
+                    PublicServiceBinder::UnixDomainBinder(ref ub) => ub.flags.clone(),
+                    PublicServiceBinder::WebServiceBinder(ref ws) => ws.flags.clone(),
+                }
             }),
         });
     }
@@ -983,6 +995,7 @@ fn mvp_deployment() -> Result<(), Box<dyn StdError>> {
                     bind_address: "::".into(),
                     port: 443,
                     start_listen: true,
+                    flags: Vec::new(),
                 }),
             },
             DeployedPublicService {
@@ -994,6 +1007,7 @@ fn mvp_deployment() -> Result<(), Box<dyn StdError>> {
                     bind_address: "::".into(),
                     port: 80,
                     start_listen: true,
+                    flags: Vec::new(),
                 }),
             },
         ],
