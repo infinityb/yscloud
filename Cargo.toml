@@ -4,8 +4,6 @@ members = [
 	"blog",
 	"blog/hyper-staticfile",
 	"experiments/linkerclient",
-	"experiments/rbpf",
-	"experiments/rbpf-disassemble",
 	"experiments/sni-multiplexor",
 	"experiments/sockets",
 	"infra/cloudsafe",
