@@ -1,8 +1,7 @@
 use std::io;
 
-use sockets::{Listener, Connected};
+use sockets::{Connected, Listener};
 use yscloud_config_model::{AppConfiguration, ServiceFileDirection};
-
 
 pub fn get_listening_socket(cfg: &AppConfiguration, name: &str) -> io::Result<Listener> {
     for file in &cfg.files {
@@ -16,7 +15,7 @@ pub fn get_listening_socket(cfg: &AppConfiguration, name: &str) -> io::Result<Li
 }
 
 pub fn get_connected_socket(cfg: &AppConfiguration, name: &str) -> io::Result<Connected> {
-for file in &cfg.files {
+    for file in &cfg.files {
         if file.direction == ServiceFileDirection::ServingConnected && file.service_name == name {
             // need to find a way to disallow duplication of this item
             return Ok(unsafe { Connected::from_raw_fd(file.file_num) });
@@ -34,8 +33,7 @@ pub fn get_service(cfg: &AppConfiguration, name: &str) -> io::Result<Listener> {
         }
     }
     if !connections.is_empty() {
-        return Ok(Listener::fixed(connections))
+        return Ok(Listener::fixed(connections));
     }
     unimplemented!("put in a not-found erorr here");
-
 }
