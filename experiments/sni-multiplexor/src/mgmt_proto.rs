@@ -1,15 +1,13 @@
 use std::io;
 use std::str::FromStr;
-use std::sync::{Arc, Mutex};
-use std::pin::Pin;
 
 use bytes::BytesMut;
 use failure::{Error, Fail};
 use ksuid::Ksuid;
 use tokio::codec::{Decoder, Encoder, Framed};
 use tokio::io::{AsyncRead, AsyncWrite};
-use futures::prelude::{Sink, Future, Stream};
-use log::warn;
+
+use tokio::sync::Lock;
 
 use crate::sni::SocketAddrPair;
 use crate::state_track::{SessionExport, SessionManager};
@@ -107,10 +105,10 @@ where
     if let Some(ref bn) = si.backend_name {
         write!(wri, "backend_name={} ", bn)?;
     }
-    if let Some(ref bc) = si.backend_conn {
-        write!(wri, "backend_connect_addr=")?;
-        write_sock_addr_pair(wri, bc)?;
-    }
+    // if let Some(ref bc) = si.backend_conn {
+    //     write!(wri, "backend_connect_addr=")?;
+    //     write_sock_addr_pair(wri, bc)?;
+    // }
     if let Some(ref bcl) = si.backend_connect_latency {
         write!(wri, "backend_connect_latency_ms={} ", bcl.as_millis())?;
     }
@@ -216,27 +214,39 @@ impl Decoder for AsciiManagerServer {
     }
 }
 
-pub fn start_management_client<A>(
-    sessman: Arc<Mutex<SessionManager>>,
+pub async fn start_management_client<A>(
+    mut sessman: Lock<SessionManager>,
     client: Framed<A, AsciiManagerServer>,
-) -> Pin<Box<dyn Future<Output=Result<(), Error>> + Send>>
+) -> Result<(), Error>
 where
-    A: AsyncRead + AsyncWrite + Send + 'static,
+    A: AsyncRead + AsyncWrite + Send + Unpin + 'static,
 {
-    let (sink, stream) = client.split();
+    use futures::sink::SinkExt;
+    use futures::stream::StreamExt;
 
-    let fut = stream
-        .into_future()
-        .map_err(|(e, _stream)| e)
-        .and_then(move |(req, stream)| recursive_handle(sessman, stream, sink, req));
-    Box::new(fut)
+    let (mut sink, mut stream) = client.split();
+    loop {
+        let (next_item, stream_tail) = stream.into_future().await;
+        stream = stream_tail;
+
+        let item = match next_item {
+            Some(item) => item,
+            None => break,
+        };
+        let item = item?;
+
+        let response = handle_query(&mut sessman, item).await?;
+        sink.send(response).await;
+    }
+
+    Ok(())
 }
 
-fn handle_query(
-    sessman: &Mutex<SessionManager>,
+async fn handle_query(
+    sessman: &mut Lock<SessionManager>,
     req: AsciiManagerRequest,
 ) -> Result<AsciiManagerResponse, Error> {
-    let mut sessions = sessman.lock().unwrap();
+    let mut sessions = sessman.lock().await;
     match req {
         AsciiManagerRequest::PrintActiveSessions => {
             let sessions = sessions.get_sessions();
@@ -247,32 +257,4 @@ fn handle_query(
             Err(()) => Ok(AsciiManagerResponse::GenericError),
         },
     }
-}
-
-async fn recursive_handle<St, Si>(
-    sessman: Arc<Mutex<SessionManager>>,
-    _stream: St,
-    sink: Si,
-    req: Option<AsciiManagerRequest>,
-) -> Pin<Box<dyn Future<Output=Result<(), Error>> + Send>>
-where
-    St: Stream<Item=Result<AsciiManagerRequest, Error>> + Send + Sync + 'static,
-    Si: Sink<AsciiManagerResponse, Error = Error> + Send + Sync + 'static,
-{
-    async {
-        if let Some(req) = req {
-            match handle_query(&sessman, req) {
-                Ok(resp) => {
-                    sink.send(resp).await?;
-                },
-                Err(err) => {
-                    warn!("client error: {}", err);
-                    sink.send(AsciiManagerResponse::GenericError).await?;
-                }
-            }
-            Ok(())
-        } else {
-            Ok(())
-        }
-    }.boxed()
 }

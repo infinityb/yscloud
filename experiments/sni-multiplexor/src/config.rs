@@ -1,16 +1,16 @@
-use std::pin::Pin;
 use std::collections::HashMap;
+use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::future::Future;
+use std::pin::Pin;
 
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::tcp::TcpStream;
 use tokio::net::unix::UnixStream;
 
-use crate::sni::{SocketAddrPair, ALERT_UNRECOGNIZED_NAME};
+use crate::sni::ALERT_UNRECOGNIZED_NAME;
 
 pub trait AsyncReadWrite: AsyncRead + AsyncWrite {}
 
@@ -18,58 +18,27 @@ impl AsyncReadWrite for UnixStream {}
 
 impl AsyncReadWrite for TcpStream {}
 
-type NetworkStream = Box<dyn AsyncReadWrite + Send + Sync>;
-
-// //
-
-// impl Future for ConnectFuture {
-//     type Item = (Option<SocketAddrPair>, NetworkStream);
-//     type Error = io::Error;
-
-//     fn poll(&mut self) -> Poll<Self::Item, io::Error> {
-//         use std::mem;
-
-//         match self.inner {
-//             State::Tcp(ref mut fut) => match fut.poll()? {
-//                 Async::Ready(x) => {
-//                     let addresses = SocketAddrPair::from_pair(x.local_addr()?, x.peer_addr()?)?;
-//                     Ok(Async::Ready((Some(addresses), Box::new(x))))
-//                 }
-//                 Async::NotReady => Ok(Async::NotReady),
-//             },
-//             State::Unix(ref mut fut) => match fut.poll()? {
-//                 Async::Ready(x) => Ok(Async::Ready((None, Box::new(x)))),
-//                 Async::NotReady => Ok(Async::NotReady),
-//             },
-//             State::Error(_) => {
-//                 let e = match mem::replace(&mut self.inner, State::Empty) {
-//                     State::Error(e) => e,
-//                     _ => unreachable!(),
-//                 };
-
-//                 Err(e)
-//             }
-//             State::Empty => panic!("can't poll stream twice"),
-//         }
-//     }
-// }
+type NetworkStream = Box<dyn AsyncReadWrite + Send + Sync + Unpin>;
 
 pub trait Resolver {
     // type Fut: Future<Output=io::Result<(Option<SocketAddrPair>, NetworkStream)>>;
 
     fn use_haproxy_header(&self, hostname: &str) -> bool;
 
-    fn resolve(&self, hostname: &str) -> Pin<Box<dyn Future<Output=io::Result<(Option<SocketAddrPair>, NetworkStream)>>>>;
+    fn resolve(
+        &self,
+        hostname: &str,
+    ) -> Pin<Box<dyn Future<Output = io::Result<NetworkStream>> + Send>>;
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "snake_case")]
 pub enum NetworkLocation {
     Unix(PathBuf),
     Tcp(SocketAddr),
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "snake_case")]
 pub struct Backend {
     use_haproxy_header: bool,
@@ -89,27 +58,39 @@ impl Resolver for MemoryResolver {
         }
     }
 
-    fn resolve(&self, hostname: &str) -> Pin<Box<dyn Future<Output=io::Result<(Option<SocketAddrPair>, NetworkStream)>>>> {
+    fn resolve(
+        &self,
+        hostname: &str,
+    ) -> Pin<Box<dyn Future<Output = io::Result<NetworkStream>> + Send>> {
+        use futures::future::FutureExt;
+
+        let addr_res = self.hostnames.get(hostname).cloned();
         async {
-            let addr = self.hostnames.get(hostname)
-                .ok_or_else(|| {
-                    io::Error::new(io::ErrorKind::Other, ALERT_UNRECOGNIZED_NAME)
-                })?;
+            let addr = match addr_res {
+                Some(addr) => addr,
+                None => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::Other,
+                        ALERT_UNRECOGNIZED_NAME,
+                    ));
+                }
+            };
             connect(&addr.location).await
-        }.boxed()
+        }
+            .boxed()
     }
 }
 
-pub async fn connect(location: &NetworkLocation) -> impl Future<Output=io::Result<NetworkStream>> {
+pub async fn connect(location: &NetworkLocation) -> io::Result<NetworkStream> {
     match *location {
         NetworkLocation::Unix(ref addr) => {
             let connected = UnixStream::connect(addr).await?;
             Ok(Box::new(connected) as NetworkStream)
-        },
+        }
         NetworkLocation::Tcp(ref addr) => {
             let connected = TcpStream::connect(addr).await?;
             Ok(Box::new(connected) as NetworkStream)
-        },
+        }
     }
 }
 

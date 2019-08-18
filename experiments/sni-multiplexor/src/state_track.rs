@@ -3,10 +3,9 @@ use std::collections::HashMap;
 use std::mem;
 use std::time::{Duration, Instant};
 
-use futures::future::{abortable, AbortHandle, Abortable, FutureExt, Shared};
 use ksuid::Ksuid;
-use log::{debug, info};
 
+use crate::abortable_stream::AbortHandle;
 use crate::sni::SocketAddrPair;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -19,32 +18,6 @@ pub enum SessionState {
     Shutdown,
 }
 
-pub struct SessionCreateCommand {
-    start_time: Instant,
-    client_conn: SocketAddrPair,
-    abort_handle: AbortHandle,
-}
-
-pub type SessionAbortFuture = Shared<Abortable<Empty<()>>>;
-
-impl SessionCreateCommand {
-    pub fn new(
-        start_time: Instant,
-        client_conn: SocketAddrPair,
-    ) -> (SessionCreateCommand, SessionAbortFuture) {
-        let (abort_future, abort_handle) = abortable(empty());
-
-        (
-            SessionCreateCommand {
-                start_time,
-                client_conn,
-                abort_handle,
-            },
-            abort_future.shared(),
-        )
-    }
-}
-
 pub struct SessionCommand {
     pub session_id: Ksuid,
     pub data: SessionCommandData,
@@ -52,9 +25,8 @@ pub struct SessionCommand {
 
 pub enum SessionCommandData {
     Destroy,
-    Create(SessionCreateCommand),
     BackendConnecting(String),
-    Connected(SocketAddrPair),
+    Connected,
     XmitClientToBackend(u64),
     XmitBackendToClient(u64),
     ShutdownRead,
@@ -85,7 +57,7 @@ pub struct SessionExport {
     pub start_time: Instant,
     pub client_conn: SocketAddrPair,
     pub backend_name: Option<String>,
-    pub backend_conn: Option<SocketAddrPair>,
+    // pub backend_conn: Option<SocketAddrPair>,
     pub backend_connect_start: Option<Instant>,
     pub backend_connect_latency: Option<Duration>,
     pub state: SessionState,
@@ -101,15 +73,20 @@ impl SessionExport {
 }
 
 impl Session {
-    fn new(session_id: Ksuid, creat: SessionCreateCommand) -> Session {
+    pub fn new(
+        session_id: Ksuid,
+        start_time: Instant,
+        client_addr: SocketAddrPair,
+        aborter: AbortHandle,
+    ) -> Session {
         Session {
-            abort_handle: Some(creat.abort_handle),
+            abort_handle: Some(aborter),
             exportable: SessionExport {
                 session_id,
-                start_time: creat.start_time,
-                client_conn: creat.client_conn.clone(),
+                start_time: start_time,
+                client_conn: client_addr,
                 backend_name: None,
-                backend_conn: None,
+                // backend_conn: None,
                 backend_connect_latency: None,
                 backend_connect_start: None,
                 state: SessionState::Handshaking,
@@ -137,10 +114,14 @@ impl SessionManager {
         }
     }
 
+    pub fn add_session(&mut self, session: Session) {
+        self.sessions.insert(session.exportable.session_id, session);
+    }
+
     pub fn destroy(&mut self, ksuid: &Ksuid) -> Result<(), ()> {
         if let Some(sess) = self.sessions.get_mut(ksuid) {
             if let Some(handle) = sess.abort_handle.take() {
-                handle.abort();
+                drop(handle);
                 return Ok(());
             }
         }
@@ -163,83 +144,58 @@ impl SessionManager {
             .collect()
     }
 
-    pub fn apply_command(&mut self, cmd: SessionCommand) {
-        self.cleanup();
+    pub fn mark_backend_connecting(&mut self, session_id: &Ksuid, backend_name: &str) {
+        let inst = self.sessions.get_mut(session_id).unwrap();
+        inst.exportable.state = SessionState::BackendConnecting;
+        inst.exportable.backend_name = Some(backend_name.to_string());
+        inst.exportable.backend_connect_start = Some(Instant::now());
+    }
 
-        if let SessionCommandData::Create(creat) = cmd.data {
-            self.sessions
-                .insert(cmd.session_id, Session::new(cmd.session_id, creat));
-            return;
+    pub fn mark_connected(&mut self, session_id: &Ksuid) {
+        let inst = self.sessions.get_mut(session_id).unwrap();
+        inst.exportable.state = SessionState::Connected;
+        if let Some(start) = inst.exportable.backend_connect_start {
+            inst.exportable.backend_connect_latency = Some(start.elapsed());
         }
+    }
 
-        let mut inst = self.sessions.get_mut(&cmd.session_id).unwrap();
+    pub fn mark_shutdown_read(&mut self, session_id: &Ksuid) {
+        let inst = self.sessions.get_mut(session_id).unwrap();
+        inst.exportable.state = if inst.exportable.state == SessionState::ShutdownWrite {
+            SessionState::Shutdown
+        } else {
+            SessionState::ShutdownRead
+        };
+    }
 
-        let pre_state = inst.exportable.state.clone();
-        let mut state_change = false;
-        match cmd.data {
-            SessionCommandData::Create(..) => (),
-            SessionCommandData::Destroy => {
-                //
-            }
+    pub fn mark_shutdown_write(&mut self, session_id: &Ksuid) {
+        let inst = self.sessions.get_mut(session_id).unwrap();
+        inst.exportable.state = if inst.exportable.state == SessionState::ShutdownRead {
+            SessionState::Shutdown
+        } else {
+            SessionState::ShutdownWrite
+        };
+    }
 
-            SessionCommandData::BackendConnecting(ref backend_name) => {
-                state_change = true;
-                inst.exportable.state = SessionState::BackendConnecting;
-                inst.exportable.backend_name = Some(backend_name.clone());
-                inst.exportable.backend_connect_start = Some(Instant::now());
-            }
-            SessionCommandData::Connected(ref sap) => {
-                state_change = true;
-                inst.exportable.state = SessionState::Connected;
-                inst.exportable.backend_conn = Some(sap.clone());
-                if let Some(start) = inst.exportable.backend_connect_start {
-                    inst.exportable.backend_connect_latency = Some(start.elapsed());
-                }
-            }
-            SessionCommandData::XmitClientToBackend(bytes) => {
-                inst.exportable.bytes_client_to_backend += bytes;
-                inst.exportable.last_xmit = Instant::now();
-            }
-            SessionCommandData::XmitBackendToClient(bytes) => {
-                inst.exportable.bytes_backend_to_client += bytes;
-                inst.exportable.last_xmit = Instant::now();
-            }
-            SessionCommandData::ShutdownRead => {
-                state_change = true;
-                inst.exportable.state = if inst.exportable.state == SessionState::ShutdownWrite {
-                    SessionState::Shutdown
-                } else {
-                    SessionState::ShutdownRead
-                };
-            }
-            SessionCommandData::ShutdownWrite => {
-                state_change = true;
-                inst.exportable.state = if inst.exportable.state == SessionState::ShutdownRead {
-                    SessionState::Shutdown
-                } else {
-                    SessionState::ShutdownWrite
-                };
-            }
-        }
+    pub fn mark_shutdown(&mut self, session_id: &Ksuid) {
+        let inst = self.sessions.get_mut(session_id).unwrap();
+        inst.exportable.state = SessionState::Shutdown;
 
-        if inst.exportable.state == SessionState::Shutdown {
-            debug!("scheduling removal of {}", cmd.session_id.fmt_base62());
+        let key = (Instant::now() + Duration::new(30, 0), self.tie_break_ctr);
+        self.tie_break_ctr += 1;
+        self.tie_break_ctr &= 0x7FFF_FFFF;
+        self.removal_queue.insert(key, *session_id);
+    }
 
-            let key = (Instant::now() + Duration::new(30, 0), self.tie_break_ctr);
-            self.tie_break_ctr += 1;
-            self.tie_break_ctr &= 0x7FFF_FFFF;
+    pub fn handle_xmit_backend_to_client(&mut self, session_id: &Ksuid, bytes: u64) {
+        let inst = self.sessions.get_mut(session_id).unwrap();
+        inst.exportable.bytes_backend_to_client += bytes;
+        inst.exportable.last_xmit = Instant::now();
+    }
 
-            self.removal_queue.insert(key, cmd.session_id);
-            return;
-        }
-
-        if state_change {
-            info!(
-                "{} {:?} -> {:?}",
-                cmd.session_id.fmt_base62(),
-                pre_state,
-                inst.exportable.state
-            );
-        }
+    pub fn handle_xmit_client_to_backend(&mut self, session_id: &Ksuid, bytes: u64) {
+        let inst = self.sessions.get_mut(session_id).unwrap();
+        inst.exportable.bytes_client_to_backend += bytes;
+        inst.exportable.last_xmit = Instant::now();
     }
 }
