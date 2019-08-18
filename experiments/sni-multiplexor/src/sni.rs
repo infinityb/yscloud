@@ -2,22 +2,20 @@ use std::fmt::{self, Write as _Write};
 use std::fs::{remove_file, File};
 use std::io::{self, Write};
 use std::net::{SocketAddr, SocketAddrV4, SocketAddrV6};
+use std::pin::Pin;
 use std::sync::Arc;
-use std::time::Duration;
-use std::time::Instant;
+use std::task::{Poll, Context};
+use std::time::{Instant, Duration};
 
 use bytes::{Bytes, BytesMut};
 use copy_arena::Arena;
-use futures::compat::{Compat01As03, Compat01As03Sink};
 use futures::future::{self, select, Aborted, Either};
-use futures::prelude::{Sink, SinkExt, Stream, StreamExt};
-use futures01::prelude::Future as LegacyFuture;
+use futures::prelude::{Sink, Stream};
+use futures::stream::{SplitSink, SplitStream};
 use ksuid::Ksuid;
 use log::{debug, info, warn};
 use tokio::codec::{Decoder, Encoder, Framed};
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::prelude::stream::{SplitSink, SplitStream};
-use tokio::prelude::FutureExt;
 use tokio::sync::mpsc::Sender;
 
 use tls::{
@@ -303,8 +301,7 @@ pub struct ClientMetadata {
     pub session_id: Ksuid,
     pub start_time: Instant,
     pub client_conn: SocketAddrPair,
-    pub stats_tx_impl: Sender<SessionCommand>,
-    pub stats_tx: Compat01As03Sink<Sender<SessionCommand>, SessionCommand>,
+    pub stats_tx: Sender<SessionCommand>,
     pub aborter: SessionAbortFuture,
 }
 
@@ -316,9 +313,6 @@ pub async fn start_client<A>(
 where
     A: AsyncRead + AsyncWrite + Send + 'static,
 {
-    use futures01::prelude::Stream;
-
-    let mut stats_tx = Compat01As03Sink::new(client_meta.stats_tx_impl.clone());
     let client_meta_session_id = client_meta.session_id;
     let hanshake_client_meta_client_conn = client_meta.client_conn.peer_addr();
 
@@ -330,7 +324,6 @@ where
 
     // TODO/XXX: we need a timeout thing.
     let (client_sink, client_stream) = client.split();
-    let client_sink = Compat01As03Sink::new(client_sink);
 
     let mut proxy_buf = BytesMut::with_capacity(107);
 
@@ -379,7 +372,7 @@ where
             }
         });
 
-    let (first_frame, client_stream_tail) = Compat01As03::new(client_fut)
+    let (first_frame, client_stream_tail) = client_fut
         .await
         .map_err(|()| io::Error::new(io::ErrorKind::Other, format!("{}:{}", file!(), line!())))?;
 
@@ -396,7 +389,7 @@ where
         }
     }
 
-    let client_stream = Compat01As03::new(client_stream_tail);
+    let client_stream = client_stream_tail;
     if !connector.use_haproxy_header(&hostname) {
         // clears the whole thing.
         proxy_buf.take();
@@ -411,7 +404,7 @@ where
     )
     .await;
 
-    stats_tx
+    client_meta.stats_tx
         .send(SessionCommand {
             session_id: client_meta_session_id,
             data: SessionCommandData::Destroy,
@@ -425,7 +418,7 @@ where
 #[allow(clippy::needless_lifetimes)]
 async fn unidirectional_copy<Si, St>(
     session_id: Ksuid,
-    mut stats_tx: Compat01As03Sink<Sender<SessionCommand>, SessionCommand>,
+    mut stats_tx: Sender<SessionCommand>,
     aborter: SessionAbortFuture,
     mut sink: Si,
     mut stream: St,
@@ -434,7 +427,7 @@ async fn unidirectional_copy<Si, St>(
 where
     Si: Sink<SniDetectRecord> + Unpin,
     St: Stream<Item = Result<SniDetectRecord, io::Error>> + Unpin,
-    Si::SinkError: std::error::Error + Sync + Send + 'static,
+    Si::Error: std::error::Error + Sync + Send + 'static,
 {
     loop {
         let stream_fut = stream.into_future();
@@ -484,10 +477,9 @@ where
         }
     }
 
-    sink.close()
-        .await
+
+    SinkCloser(sink).await
         .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
-    drop(sink);
 
     let sess_cmd = SessionCommand {
         session_id,
@@ -503,22 +495,30 @@ where
     Ok(())
 }
 
+struct SinkCloser<T, S>(S) where S: Sink<T>;
+
+impl<T, S> std::future::Future for SinkCloser<T, S> where S: Sink<T> {
+    type Output = Result<(), S::Error>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
+        self.0.poll_close(cx)
+    }
+}
+
 pub async fn bidirectional_copy<A, B>(
     client_meta: ClientMetadata,
-    client_stream: Compat01As03<SplitStream<Framed<A, SniDetectorCodec>>>,
-    client_sink: Compat01As03Sink<SplitSink<Framed<A, SniDetectorCodec>>, SniDetectRecord>,
-    server_stream: Compat01As03<SplitStream<Framed<B, SniPassCodec>>>,
-    server_sink: Compat01As03Sink<SplitSink<Framed<B, SniPassCodec>>, SniDetectRecord>,
+    client_stream: SplitStream<Framed<A, SniDetectorCodec>>,
+    client_sink: SplitSink<Framed<A, SniDetectorCodec>, SniDetectRecord>,
+    server_stream: SplitStream<Framed<B, SniPassCodec>>,
+    server_sink: SplitSink<Framed<B, SniPassCodec>, SniDetectRecord>,
 ) -> Result<(), io::Error>
 where
     A: AsyncRead + AsyncWrite + Send + 'static,
     B: AsyncRead + AsyncWrite + Send + 'static,
 {
-    let s2c_stats_tx = Compat01As03Sink::new(client_meta.stats_tx_impl.clone());
-    let c2s_stats_tx = Compat01As03Sink::new(client_meta.stats_tx_impl.clone());
     let server_to_client = unidirectional_copy(
         client_meta.session_id,
-        s2c_stats_tx,
+        client_meta.stats_tx.clone(),
         client_meta.aborter.clone(),
         client_sink,
         server_stream,
@@ -527,7 +527,7 @@ where
 
     let client_to_server = unidirectional_copy(
         client_meta.session_id,
-        c2s_stats_tx,
+        client_meta.stats_tx,
         client_meta.aborter,
         server_sink,
         client_stream,
@@ -554,14 +554,12 @@ async fn connect_hostname_helper<A>(
     resolver: Arc<dyn Resolver + Send + Sync + Unpin>,
     hostname: String,
     proxy_line: Bytes,
-    client_sink: Compat01As03Sink<SplitSink<Framed<A, SniDetectorCodec>>, SniDetectRecord>,
-    client_stream: Compat01As03<SplitStream<Framed<A, SniDetectorCodec>>>,
+    client_sink: SplitSink<Framed<A, SniDetectorCodec>, SniDetectRecord>,
+    client_stream: SplitStream<Framed<A, SniDetectorCodec>>,
 ) -> Result<(), io::Error>
 where
     A: AsyncRead + AsyncWrite + Send + 'static,
 {
-    use futures01::stream::Stream;
-
     let client_meta_session_id = client_meta.session_id;
 
     client_meta
@@ -588,16 +586,14 @@ where
             }
         });
 
-    let (sockaddr_pair, socket) = Compat01As03::new(stream_fut).await?;
+    let (sockaddr_pair, socket) = stream_fut.await?;
     info!(
         "{}: connected to backend after {}ms",
         client_meta_session_id.fmt_base62(),
         duration_milliseconds(client_meta.start_time.elapsed())
     );
 
-    let (backend_sink, backend_stream) = SniPassCodec.framed(socket).split();
-    let mut backend_sink = Compat01As03Sink::new(backend_sink);
-    let backend_stream = Compat01As03::new(backend_stream);
+    let (mut backend_sink, backend_stream) = SniPassCodec.framed(socket).split();
 
     if let Some(pair) = sockaddr_pair {
         warn!("{} connection", client_meta_session_id.fmt_base62());
@@ -642,8 +638,8 @@ async fn connect_hostname<A>(
     resolver: Arc<dyn Resolver + Send + Sync + Unpin>,
     hostname: String,
     proxy_line: Bytes,
-    client_sink: Compat01As03Sink<SplitSink<Framed<A, SniDetectorCodec>>, SniDetectRecord>,
-    client_stream: Compat01As03<SplitStream<Framed<A, SniDetectorCodec>>>,
+    client_sink: SplitSink<Framed<A, SniDetectorCodec>, SniDetectRecord>,
+    client_stream: SplitStream<Framed<A, SniDetectorCodec>>,
 ) -> Result<(), io::Error>
 where
     A: AsyncRead + AsyncWrite + Send + 'static,

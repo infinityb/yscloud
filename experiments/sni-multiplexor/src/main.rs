@@ -1,6 +1,5 @@
-#![feature(await_macro, async_await)]
+#![feature(async_await)]
 use std::fs::File;
-use std::io;
 use std::net::TcpListener as StdTcpListener;
 use std::os::unix::io::{FromRawFd, RawFd};
 use std::os::unix::net::UnixListener as StdUnixListener;
@@ -8,18 +7,17 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use clap::{App, Arg};
-use futures::compat::Compat01As03Sink;
-use futures::prelude::{FutureExt, SinkExt, TryFutureExt};
 use ksuid::Ksuid;
 use log::LevelFilter;
-use log::{info, warn};
+use log::warn;
 use serde::{Deserialize, Serialize};
 use tokio::codec::Decoder;
 use tokio::net::TcpListener;
 use tokio::net::UnixListener;
-use tokio::prelude::{Future, Stream};
 use tokio::reactor::Handle;
 use tokio::sync::mpsc::channel;
+use futures::future::FutureExt;
+use futures::stream::StreamExt;
 
 use crate::state_track::{SessionCommand, SessionCommandData, SessionCreateCommand};
 use yscloud_config_model::AppConfiguration;
@@ -158,76 +156,108 @@ fn main() {
     let (stats_tx, stats_rx) = channel(128);
 
     let sessman_stats = Arc::clone(&sessman);
-    let stats_gather = stats_rx
-        .for_each(move |cmd| {
+    let stats_gather = async {
+        let mut stats_rx = stats_rx;
+        loop {
+            let (next_item, tail) = stats_rx.into_future().await;
+            stats_rx = tail;
+
+            let v = match next_item {
+                Some(v) => v,
+                None => break,
+            };
             let mut sessman = sessman_stats.lock().unwrap();
-            sessman.apply_command(cmd);
-            Ok(())
-        })
-        .map_err(|e| info!("stats receiver died: {}", e));
+            sessman.apply_command(v);
+        }
+    };
 
-    let mgmt_server = mgmt_listener
-        .incoming()
-        .for_each(move |socket| {
+    let mgmt_server = async {
+        let mut mgmt_incoming = mgmt_listener.incoming();
+        loop {
+            let (next_item, tail) = mgmt_incoming.into_future().await;
+            mgmt_incoming = tail;
+
+            let socket = match next_item {
+                Some(socket) => socket,
+                None => break,
+            };
+
+            let socket = socket.expect("FIXME");
             let framed = AsciiManagerServer::new().framed(socket);
-            tokio::spawn(
-                start_management_client(mgmt_sessman.clone(), framed).map_err(|e| {
-                    warn!("management client terminated: {}", e);
-                }),
-            );
-            Ok(())
-        })
-        .map_err(|e| eprintln!("accept error: {}", e));
-
-    let data_server = data_listener
-        .incoming()
-        .map(move |socket| (stats_tx.clone(), server_resolver.clone(), socket))
-        .map_err(|e| warn!("data-server accept error: {}", e))
-        .for_each(move |(stats_tx, server_resolver, socket)| {
-            let stats_tx_impl = stats_tx.clone();
-            tokio::spawn(
-                async {
-                    let server_resolver = server_resolver;
-                    let start_time = Instant::now();
-                    let session_id = Ksuid::generate();
-
-                    let client_conn =
-                        SocketAddrPair::from_pair(socket.local_addr()?, socket.peer_addr()?)?;
-                    let mut stats_tx = Compat01As03Sink::new(stats_tx_impl.clone());
-
-                    let (creat, aborter) =
-                        SessionCreateCommand::new(start_time, client_conn.clone());
-
-                    stats_tx
-                        .send(SessionCommand {
-                            session_id,
-                            data: SessionCommandData::Create(creat),
-                        })
-                        .await
-                        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
-
-                    let client_meta = ClientMetadata {
-                        session_id,
-                        start_time,
-                        client_conn,
-                        stats_tx_impl,
-                        stats_tx,
-                        aborter,
-                    };
-                    let resolver = server_resolver.lock().unwrap().clone();
-                    let framed = SniDetectorCodec::new(session_id).framed(socket);
-
-                    start_client(resolver, client_meta, framed).await?;
-
-                    Ok(())
+            tokio::spawn(async {
+                if let Err(err) = start_management_client(mgmt_sessman.clone(), framed).await {
+                    warn!("management client terminated: {}", err);
                 }
-                    .boxed()
-                    .compat()
-                    .map_err(|e: io::Error| eprintln!("accept error: {}", e)),
-            );
+            });
+        }
+    };
 
-            Ok(())
-        });
+    let data_server = async {
+        let mut data_incoming = data_listener.incoming();
 
-    tokio::run(stats_gather.join(mgmt_server).join(data_server).map(|_| ()));
+        loop {
+            let (next_item, tail) = data_incoming.into_future().await;
+            data_incoming = tail;
+
+            let socket = match next_item {
+                Some(socket) => socket,
+                None => break,
+            };
+
+            let socket = socket.expect("FIXME");
+            let start_time = Instant::now();
+                let session_id = Ksuid::generate();
+
+            let laddr = match socket.local_addr() {
+                Ok(laddr) => laddr,
+                Err(err) => {
+                    warn!("bad local address for socket: {}", err);
+                    continue;
+                }
+            };
+            let paddr = match socket.peer_addr() {
+                Ok(paddr) => paddr,
+                Err(err) => {
+                    warn!("bad peer address for socket: {}", err);
+                    continue;
+                }
+            };
+            let client_conn = match SocketAddrPair::from_pair(laddr, paddr) {
+                Ok(paddr) => paddr,
+                Err(err) => {
+                    warn!("bad address pair for socket: {}", err);
+                    continue;
+                }
+            };
+
+            let (creat, aborter) = SessionCreateCommand::new(start_time, client_conn.clone());
+
+            stats_tx
+                .send(SessionCommand {
+                    session_id,
+                    data: SessionCommandData::Create(creat),
+                })
+                .await.expect("FIXME");
+
+            tokio::spawn(async {
+                let mut stats_tx = stats_tx.clone();
+                let client_meta = ClientMetadata {
+                    session_id,
+                    start_time,
+                    client_conn,
+                    stats_tx,
+                    aborter,
+                };
+                let resolver = server_resolver.lock().unwrap().clone();
+                let framed = SniDetectorCodec::new(session_id).framed(socket);
+
+                if let Err(err) = start_client(resolver, client_meta, framed).await {
+                    warn!("start_client returned error: {}", err);
+                }
+            });
+        }
+    };
+
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    runtime.block_on(stats_gather.join(mgmt_server).join(data_server).map(|_| ()));
 }

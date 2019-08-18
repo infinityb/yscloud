@@ -1,13 +1,15 @@
 use std::io;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
+use std::pin::Pin;
 
 use bytes::BytesMut;
 use failure::{Error, Fail};
 use ksuid::Ksuid;
 use tokio::codec::{Decoder, Encoder, Framed};
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::prelude::{future, Future, Sink, Stream};
+use futures::prelude::{Sink, Future, Stream};
+use log::warn;
 
 use crate::sni::SocketAddrPair;
 use crate::state_track::{SessionExport, SessionManager};
@@ -217,7 +219,7 @@ impl Decoder for AsciiManagerServer {
 pub fn start_management_client<A>(
     sessman: Arc<Mutex<SessionManager>>,
     client: Framed<A, AsciiManagerServer>,
-) -> Box<dyn Future<Item = (), Error = Error> + Send>
+) -> Pin<Box<dyn Future<Output=Result<(), Error>> + Send>>
 where
     A: AsyncRead + AsyncWrite + Send + 'static,
 {
@@ -247,30 +249,30 @@ fn handle_query(
     }
 }
 
-fn recursive_handle<St, Si>(
+async fn recursive_handle<St, Si>(
     sessman: Arc<Mutex<SessionManager>>,
     _stream: St,
     sink: Si,
     req: Option<AsciiManagerRequest>,
-) -> Box<dyn Future<Item = (), Error = Error> + Send>
+) -> Pin<Box<dyn Future<Output=Result<(), Error>> + Send>>
 where
-    St: Stream<Item = AsciiManagerRequest, Error = Error> + Send + Sync + 'static,
-    Si: Sink<SinkItem = AsciiManagerResponse, SinkError = Error> + Send + Sync + 'static,
+    St: Stream<Item=Result<AsciiManagerRequest, Error>> + Send + Sync + 'static,
+    Si: Sink<AsciiManagerResponse, Error = Error> + Send + Sync + 'static,
 {
-    if let Some(req) = req {
-        match handle_query(&sessman, req) {
-            Ok(resp) => {
-                let fut = sink.send(resp).map(move |_sink| ());
-                Box::new(fut)
+    async {
+        if let Some(req) = req {
+            match handle_query(&sessman, req) {
+                Ok(resp) => {
+                    sink.send(resp).await?;
+                },
+                Err(err) => {
+                    warn!("client error: {}", err);
+                    sink.send(AsciiManagerResponse::GenericError).await?;
+                }
             }
-            Err(err) => {
-                let fut = sink
-                    .send(AsciiManagerResponse::GenericError)
-                    .map(move |_sink| ());
-                Box::new(fut)
-            }
+            Ok(())
+        } else {
+            Ok(())
         }
-    } else {
-        Box::new(future::ok(()))
-    }
+    }.boxed()
 }

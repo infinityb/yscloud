@@ -1,12 +1,11 @@
 use std::collections::BTreeMap;
 use std::collections::HashMap;
-use std::error::Error as StdError;
 use std::mem;
 use std::time::{Duration, Instant};
 
-use futures::future::{abortable, empty, AbortHandle, Abortable, Empty, FutureExt, Shared};
+use futures::future::{abortable, AbortHandle, Abortable, FutureExt, Shared};
 use ksuid::Ksuid;
-use log::{debug, info, warn};
+use log::{debug, info};
 
 use crate::sni::SocketAddrPair;
 
