@@ -1,7 +1,7 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
-use log::{debug};
+use log::debug;
 use semver::Version;
 
 use super::platform::{self, Executable};

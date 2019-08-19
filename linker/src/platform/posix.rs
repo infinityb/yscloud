@@ -1,7 +1,7 @@
 use std::io;
 use std::os::unix::io::AsRawFd;
 
-use log::{debug, log, warn};
+use log::{debug, warn};
 
 use super::imp;
 use crate::{AppConfiguration, AppPreforkConfiguration, FileDescriptorInfo};
@@ -9,7 +9,7 @@ use crate::{AppConfiguration, AppPreforkConfiguration, FileDescriptorInfo};
 pub fn relabel_file_descriptors(c: &AppPreforkConfiguration) -> io::Result<AppConfiguration> {
     // this seems ghetto?
 
-    let mut keep_map = [false; 256];
+    let mut keep_map = [false; 2048];
     for v in keep_map.iter_mut().take(3) {
         *v = true;
     }

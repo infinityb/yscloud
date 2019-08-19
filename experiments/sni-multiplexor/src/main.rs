@@ -209,14 +209,6 @@ fn main() {
                     continue;
                 }
             };
-
-            // pub async fn start_client<A>(
-            //     sessman: Lock<SessionManager>,
-            //     connector: Arc<dyn Resolver + Send + Sync + Unpin>,
-            //     client_addr: SocketAddrPair,
-            //     client: A,
-            // )
-
             tokio::spawn(start_client(
                 data_sessman.clone(),
                 resolver.clone(),

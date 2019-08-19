@@ -12,10 +12,9 @@ const UNSAFE_NETWORKS_V4: &[&str] = &[
 
 // FIXME: when we can make a Ipv6Network at compile time, do so.
 const UNSAFE_NETWORKS_V6: &[&str] = &[
-    "::1/128",        // IPv6 loopback
-    "fe80::/10",      // IPv6 link-local
+    "::1/128",   // IPv6 loopback
+    "fe80::/10", // IPv6 link-local
 ];
-
 
 pub fn is_ip_addr_safe(ip: &IpAddr) -> bool {
     match *ip {

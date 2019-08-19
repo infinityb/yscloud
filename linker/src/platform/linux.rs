@@ -2,18 +2,16 @@ use std::error::Error as StdError;
 use std::ffi::CString;
 use std::fmt;
 use std::io;
+use std::os::unix::io::FromRawFd;
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::os::unix::io::FromRawFd;
 
-use log::{info, log, warn};
+use log::{info, warn};
 use nix::fcntl::{open, OFlag};
 use nix::sys::stat::Mode;
-use nix::unistd::{
-    fexecve, fork, lseek64, setgid, setuid, write, ForkResult, Gid, Pid, Uid, Whence,
-};
+use nix::unistd::{fexecve, fork, lseek64, write, ForkResult, Gid, Pid, Uid, Whence};
 use users::{get_group_by_name, get_user_by_name};
 
 use super::super::OwnedFd;
@@ -40,15 +38,14 @@ impl Executable {
         P: AsRef<Path>,
     {
         let path: &Path = path.as_ref();
-        let artifact_file = open(path, OFlag::O_RDONLY, Mode::empty())
+        let artifact_file = open(path, OFlag::O_RDONLY | OFlag::O_CLOEXEC, Mode::empty())
             .map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
 
         Ok(Executable(unsafe { OwnedFd::from_raw_fd(artifact_file) }))
     }
 
-    pub fn execute(&self, arguments: &[CString]) -> io::Result<!> {
-        let backtrace = CString::new("RUST_BACKTRACE=1").unwrap();  
-        fexecve(self.0.as_raw_fd(), arguments, &[backtrace])
+    pub fn execute(&self, arguments: &[CString], env: &[CString]) -> io::Result<!> {
+        fexecve(self.0.as_raw_fd(), arguments, env)
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
 
         // successful executions of fexecve don't return.
@@ -85,7 +82,10 @@ pub struct UserChangeStrategy {
     set_group: Option<Gid>,
 }
 
-fn io_other<E>(e: E) -> io::Error where E: Into<Box<dyn StdError + Send + Sync>> {
+fn io_other<E>(e: E) -> io::Error
+where
+    E: Into<Box<dyn StdError + Send + Sync>>,
+{
     io::Error::new(io::ErrorKind::Other, e)
 }
 
@@ -109,7 +109,7 @@ impl SandboxingStrategy for UserChangeStrategy {
 }
 
 pub struct ExecExtras {
-    sandboxing_strategy: Option<Arc<SandboxingStrategy>>,
+    sandboxing_strategy: Option<Arc<dyn SandboxingStrategy>>,
 }
 
 impl ExecExtras {
@@ -141,7 +141,7 @@ impl ExecExtrasBuilder {
             let msg = format!("unknown group {}", name);
             io::Error::new(io::ErrorKind::Other, msg)
         })?;
-        
+
         self.set_group = Some(Gid::from_raw(gid.gid()));
         Ok(())
     }
@@ -198,7 +198,11 @@ fn exec_artifact_child(ext: &ExecExtras, c: &AppPreforkConfiguration) -> io::Res
     if let Some(ref sandbox) = ext.sandboxing_strategy {
         sandbox.preexec()?;
     }
-    c.artifact.execute(arguments)?;
+    let env = &[
+        CString::new("RUST_BACKTRACE=1").unwrap(),
+        CString::new("YSCLOUD=1").unwrap(),
+    ];
+    c.artifact.execute(arguments, env)?;
 
     unreachable!();
 }

@@ -1,6 +1,6 @@
-use std::path::PathBuf;
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
+use std::path::PathBuf;
 
 use semver::{Version, VersionReq};
 use serde::{Deserialize, Serialize};
@@ -20,7 +20,7 @@ pub struct DeploymentManifest {
     pub deployment_name: String,
     pub public_services: Vec<DeployedPublicService>,
     pub components: Vec<DeployedApplicationManifest>,
-    #[serde(default="Default::default")]
+    #[serde(default = "Default::default")]
     pub path_overrides: HashMap<String, String>,
 }
 
@@ -80,9 +80,9 @@ pub enum PublicServiceBinder {
 #[serde(rename_all = "snake_case")]
 pub struct UnixDomainBinder {
     pub path: PathBuf,
-    #[serde(default="start_listen_default")]
+    #[serde(default = "start_listen_default")]
     pub start_listen: bool,
-    #[serde(default="Default::default")]
+    #[serde(default = "Default::default")]
     pub flags: Vec<SocketFlag>,
 }
 
@@ -91,9 +91,9 @@ pub struct UnixDomainBinder {
 pub struct NativePortBinder {
     pub bind_address: String,
     pub port: u16,
-    #[serde(default="start_listen_default")]
+    #[serde(default = "start_listen_default")]
     pub start_listen: bool,
-    #[serde(default="Default::default")]
+    #[serde(default = "Default::default")]
     pub flags: Vec<SocketFlag>,
 }
 
@@ -112,7 +112,7 @@ fn start_listen_default() -> bool {
 #[serde(rename_all = "snake_case")]
 pub struct WebServiceBinder {
     pub hostname: String,
-    #[serde(default="Default::default")]
+    #[serde(default = "Default::default")]
     pub flags: Vec<SocketFlag>,
 }
 
@@ -124,36 +124,6 @@ pub struct Permission(Cow<'static, str>);
 pub struct ServiceConnection {
     pub providing_instance_id: Uuid,
     pub consuming_instance_id: Uuid,
-    pub service_name: String,
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug)]
-#[serde(rename_all = "snake_case")]
-pub struct AppListenPort {
-    pub service_name: String,
-    pub bind_address: AppPortBindAddress,
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug)]
-#[serde(rename_all = "snake_case")]
-pub enum AppPortBindAddress {
-    NativePort(AppPortNativePort),
-    // The service will be assign a random port number which will be
-    // discoverable via mDNS.
-    MulticastDnsService(MulticastDnsService),
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug)]
-#[serde(rename_all = "snake_case")]
-pub struct AppPortNativePort {
-    pub address: String,
-    pub port: u16,
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug)]
-#[serde(rename_all = "snake_case")]
-pub struct MulticastDnsService {
-    // like `_yshi_ircc._tcp`, I guess?
     pub service_name: String,
 }
 
@@ -238,15 +208,24 @@ struct ApplicationRegistryEntry {
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "snake_case")]
+pub struct ApplicationDeployment {
+    pub deployment_name: String,
+    pub public_services: Vec<PublicService>,
+    pub service_implementations: BTreeMap<String, String>,
+    pub configuration: BTreeMap<String, serde_json::Value>,
+    pub sandbox: BTreeMap<String, Sandbox>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "snake_case")]
 pub struct ApplicationManifest {
-    pub package_id: String,
-    pub version: Version,
-    pub provided_local_services: Vec<String>,
     pub provided_remote_services: Vec<String>,
+    pub provided_local_services: Vec<String>,
     pub required_remote_services: Vec<String>,
     pub required_local_services: Vec<String>,
-    pub sandbox: Sandbox,
+    pub permissions: Vec<Permission>,
 }
+
 
 #[derive(Serialize, Deserialize, Clone, Debug, Eq, PartialEq)]
 #[serde(rename_all = "kebab-case")]

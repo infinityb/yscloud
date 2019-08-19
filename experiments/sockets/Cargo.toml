@@ -8,4 +8,3 @@ edition = "2018"
 
 [dependencies]
 nix = "0.13"
-futures-preview = { version = "=0.3.0-alpha.16", features = ["compat"] }

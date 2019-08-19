@@ -18,21 +18,6 @@ pub enum SessionState {
     Shutdown,
 }
 
-pub struct SessionCommand {
-    pub session_id: Ksuid,
-    pub data: SessionCommandData,
-}
-
-pub enum SessionCommandData {
-    Destroy,
-    BackendConnecting(String),
-    Connected,
-    XmitClientToBackend(u64),
-    XmitBackendToClient(u64),
-    ShutdownRead,
-    ShutdownWrite,
-}
-
 impl SessionState {
     pub fn as_str(&self) -> &'static str {
         match *self {
@@ -149,6 +134,8 @@ impl SessionManager {
         inst.exportable.state = SessionState::BackendConnecting;
         inst.exportable.backend_name = Some(backend_name.to_string());
         inst.exportable.backend_connect_start = Some(Instant::now());
+
+        self.cleanup();
     }
 
     pub fn mark_connected(&mut self, session_id: &Ksuid) {
@@ -157,6 +144,8 @@ impl SessionManager {
         if let Some(start) = inst.exportable.backend_connect_start {
             inst.exportable.backend_connect_latency = Some(start.elapsed());
         }
+
+        self.cleanup();
     }
 
     pub fn mark_shutdown_read(&mut self, session_id: &Ksuid) {
@@ -166,6 +155,8 @@ impl SessionManager {
         } else {
             SessionState::ShutdownRead
         };
+
+        self.cleanup();
     }
 
     pub fn mark_shutdown_write(&mut self, session_id: &Ksuid) {
@@ -175,6 +166,8 @@ impl SessionManager {
         } else {
             SessionState::ShutdownWrite
         };
+
+        self.cleanup();
     }
 
     pub fn mark_shutdown(&mut self, session_id: &Ksuid) {
@@ -185,17 +178,23 @@ impl SessionManager {
         self.tie_break_ctr += 1;
         self.tie_break_ctr &= 0x7FFF_FFFF;
         self.removal_queue.insert(key, *session_id);
+
+        self.cleanup();
     }
 
     pub fn handle_xmit_backend_to_client(&mut self, session_id: &Ksuid, bytes: u64) {
         let inst = self.sessions.get_mut(session_id).unwrap();
         inst.exportable.bytes_backend_to_client += bytes;
         inst.exportable.last_xmit = Instant::now();
+
+        self.cleanup();
     }
 
     pub fn handle_xmit_client_to_backend(&mut self, session_id: &Ksuid, bytes: u64) {
         let inst = self.sessions.get_mut(session_id).unwrap();
         inst.exportable.bytes_client_to_backend += bytes;
         inst.exportable.last_xmit = Instant::now();
+
+        self.cleanup();
     }
 }

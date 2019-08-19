@@ -4,7 +4,7 @@ use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
-use log::{info, log, warn};
+use log::{info, warn};
 use nix::unistd::{execve, fork, lseek, unlink, write, ForkResult, Pid, Whence};
 use rand::{thread_rng, Rng};
 
@@ -32,11 +32,11 @@ impl Executable {
         }
     }
 
-    pub fn execute(&self, arguments: &[CString]) -> io::Result<!> {
+    pub fn execute(&self, arguments: &[CString], env: &[CString]) -> io::Result<!> {
         let path_bytes = OsStrExt::as_bytes(self.0.as_os_str());
         let artifact_path = CString::new(path_bytes).expect("valid c-string");
 
-        execve(&artifact_path, arguments, &[])
+        execve(&artifact_path, arguments, env)
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
 
         // successful executions of execve don't return.
@@ -58,8 +58,12 @@ pub struct ExecConfig {
 }
 
 fn execute_child(e: &ExecConfig) -> io::Result<!> {
+    let env = &[
+        CString::new("RUST_BACKTRACE=1").unwrap(),
+        CString::new("YSCLOUD=1").unwrap(),
+    ];
     // need to relabel file descriptors here.
-    e.executable.execute(&e.arguments)?;
+    e.executable.execute(&e.arguments, env)?;
 }
 
 pub struct ExecExtras {
@@ -108,7 +112,11 @@ fn exec_artifact_child(_e: &ExecExtras, c: AppPreforkConfiguration) -> io::Resul
 
     let app_config = relabel_file_descriptors(&c)?;
 
-    let path = format!("/tmp/yscloud-{}-{}", c.instance_id, thread_rng().gen::<u64>());
+    let path = format!(
+        "/tmp/yscloud-{}-{}",
+        c.instance_id,
+        thread_rng().gen::<u64>()
+    );
     let tmpfile = open(
         &path as &str,
         OFlag::O_CREAT | OFlag::O_RDWR,

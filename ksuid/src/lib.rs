@@ -23,12 +23,12 @@ mod base62;
 
 pub use self::base62::FmtBase62;
 
-use std::io;
 use std::ascii::AsciiExt;
+use std::io;
 
-use byteorder::{ByteOrder, BigEndian};
-use time::{Timespec, Duration};
-use rand::{Rng, Rand};
+use byteorder::{BigEndian, ByteOrder};
+use rand::{Rand, Rng};
+use time::{Duration, Timespec};
 
 /// The KSUID epoch, 1.4 billion seconds after the UNIX epoch.
 ///
@@ -37,7 +37,10 @@ use rand::{Rng, Rand};
 /// # extern crate time;
 /// assert_eq!(ksuid::EPOCH, time::strptime("2014-5-13 16:53:20", "%Y-%m-%d %T").unwrap().to_timespec());
 /// ```
-pub const EPOCH: Timespec = Timespec {sec: 1_400_000_000, nsec: 0};
+pub const EPOCH: Timespec = Timespec {
+    sec: 1_400_000_000,
+    nsec: 0,
+};
 
 const LEN: usize = 20;
 const EMPTY: [u8; LEN] = [0; LEN];
@@ -48,7 +51,8 @@ const MAX_BASE62_KSUID: &[u8] = b"aWgEPTl1tmebfsQzFP4bxwgy80V";
 
 /// Get the numeric value corresponding to the given ASCII hex digit.
 fn hex_digit(c: u8) -> io::Result<u8> {
-    HEX_DIGITS.iter()
+    HEX_DIGITS
+        .iter()
         .position(|d| c.eq_ignore_ascii_case(d))
         .map(|idx| idx as u8)
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Invalid hex character in input"))
@@ -134,7 +138,10 @@ impl Ksuid {
     /// ```
     pub fn from_hex(hex: &str) -> io::Result<Self> {
         if hex.len() != HEX_LEN {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "Hex string must be 40 bytes long"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Hex string must be 40 bytes long",
+            ));
         }
 
         let mut ret = Ksuid(EMPTY);
@@ -152,7 +159,10 @@ impl Ksuid {
     /// `raw` must be exactly 20 bytes long.
     pub fn from_bytes(raw: &[u8]) -> io::Result<Self> {
         if raw.len() != LEN {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "Ksuids are 20 bytes long"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Ksuids are 20 bytes long",
+            ));
         }
 
         let mut ret = Ksuid(EMPTY);
@@ -258,9 +268,7 @@ mod tests {
     fn bench_from_base62(b: &mut test::Bencher) {
         let encoded = ::std::str::from_utf8(MAX_BASE62_KSUID).unwrap();
 
-        b.iter(|| {
-            Ksuid::from_base62(encoded)
-        })
+        b.iter(|| Ksuid::from_base62(encoded))
     }
 
     #[bench]
@@ -290,30 +298,22 @@ mod tests {
     fn bench_to_hex(b: &mut test::Bencher) {
         let ksuid = Ksuid::from_bytes(&[255; LEN]).unwrap();
 
-        b.iter(|| {
-            ksuid.to_hex()
-        })
+        b.iter(|| ksuid.to_hex())
     }
 
     #[bench]
     fn bench_from_hex(b: &mut test::Bencher) {
-        b.iter(|| {
-            Ksuid::from_hex("ffffffffffffffffffffffffffffffffffffffff")
-        })
+        b.iter(|| Ksuid::from_hex("ffffffffffffffffffffffffffffffffffffffff"))
     }
 
     #[bench]
     fn bench_gen(b: &mut test::Bencher) {
-        b.iter(|| {
-            Ksuid::generate()
-        })
+        b.iter(|| Ksuid::generate())
     }
 
     #[bench]
     fn bench_gen_lock_rng(b: &mut test::Bencher) {
         let mut rng = rand::thread_rng();
-        b.iter(|| {
-            rng.gen::<Ksuid>()
-        })
+        b.iter(|| rng.gen::<Ksuid>())
     }
 }

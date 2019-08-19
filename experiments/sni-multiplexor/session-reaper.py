@@ -41,7 +41,7 @@ def load_sessions(fh):
 
 def get_sessions(path):
     subproc = subprocess.Popen(
-        ['/bin/nc', '-U', path],
+        ['/usr/bin/nc', '-U', path],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE)
     try:
@@ -55,7 +55,7 @@ def get_sessions(path):
 
 def destroy_session(path, session_id):
     subproc = subprocess.Popen(
-        ['/bin/nc', '-U', path],
+        ['/usr/bin/nc', '-U', path],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE)
     try:
@@ -87,15 +87,16 @@ def print_session(sess):
 
 
 def main():
-    sessions = get_sessions('/var/run/sni-multiplexor-mgmt')
+    socket_path = 'tmp/mgmt'
+    sessions = get_sessions(socket_path)
     for sess in sessions:
-        if sess.state == 'shutdown-write' and timedelta(minutes=10) < sess.last_xmit_ago:
+        if sess.state.startswith('shutdown') and timedelta(minutes=10) < sess.last_xmit_ago:
             print_session(sess)
-            destroy_session('/var/run/sni-multiplexor-mgmt', sess.session_id)
+            destroy_session(socket_path, sess.session_id)
     for sess in sessions:
         if sess.state == 'connected' and timedelta(hours=1) < sess.last_xmit_ago:
             print_session(sess)
-            destroy_session('/var/run/sni-multiplexor-mgmt', sess.session_id)
+            destroy_session(socket_path, sess.session_id)
 
 
 if __name__ == '__main__':

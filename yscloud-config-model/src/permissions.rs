@@ -1,8 +1,7 @@
-//! The intent of this package is to expose permissions that can be "compiled down" to other 
+//! The intent of this package is to expose permissions that can be "compiled down" to other
 //! confinement systems like cgroups/namespaces, seccomp-ebpf and capsicum.
 use super::Permission;
 use std::borrow::Cow;
-
 
 /// DISK_APP_LOCAL_STORAGE allows for read/write access to a directory unique to the
 /// (host, deployment-name, package-id) triple.
@@ -11,7 +10,7 @@ pub const DISK_APP_LOCAL_STORAGE: Permission = p("org.yshi.permissions.disk.app-
 /// NETWORK_OUTGOING_HTTP allows for outgoing HTTP/HTTPS requests.  These
 /// requests will be handled by a proxy server which may deny access to specific
 /// addresses and may add or replace specific headers.
-/// 
+///
 /// Perhaps this should be a service though?
 ///
 pub const NETWORK_OUTGOING_HTTP: Permission = p("org.yshi.permissions.network.outgoing-http");

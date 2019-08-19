@@ -3,8 +3,8 @@ extern crate serde_derive;
 
 extern crate docopt;
 extern crate ksuid;
-extern crate time;
 extern crate rand;
+extern crate time;
 
 use std::io::{self, Write};
 use std::process::exit;
@@ -32,8 +32,8 @@ struct Args {
 
 fn main() {
     let args: Args = docopt::Docopt::new(USAGE)
-                                     .and_then(|d| d.deserialize())
-                                     .unwrap_or_else(|e| e.exit());
+        .and_then(|d| d.deserialize())
+        .unwrap_or_else(|e| e.exit());
 
     if args.cmd_inspect {
         inspect(args)
@@ -60,7 +60,10 @@ fn inspect(args: Args) {
         } else if uid.len() == 27 {
             Ksuid::from_base62(uid.as_ref())
         } else {
-            Err(io::Error::new(io::ErrorKind::InvalidData, "KSUID must be either 27 characters (Base62) or 40 characters (Hex) in length"))
+            Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "KSUID must be either 27 characters (Base62) or 40 characters (Hex) in length",
+            ))
         };
 
         let ksuid = match res {
@@ -71,7 +74,8 @@ fn inspect(args: Args) {
             }
         };
 
-        println!("
+        println!(
+            "
 REPRESENTATION:
 
   String: {}
@@ -82,11 +86,12 @@ COMPONENTS:
        Time: {}
   Timestamp: {}
     Payload: {}
-"       ,
-        ksuid.to_base62(),
-        ksuid.to_hex(),
-        time::at(ksuid.time()).rfc822(),
-        ksuid.timestamp(),
-        ksuid.to_hex().chars().skip(8).collect::<String>());
+",
+            ksuid.to_base62(),
+            ksuid.to_hex(),
+            time::at(ksuid.time()).rfc822(),
+            ksuid.timestamp(),
+            ksuid.to_hex().chars().skip(8).collect::<String>()
+        );
     }
 }

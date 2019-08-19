@@ -39,8 +39,8 @@ impl Executable {
         imp::Executable::open(path).map(Executable)
     }
 
-    pub fn execute(&self, arguments: &[CString]) -> io::Result<!> {
-        imp::Executable::execute(&self.0, arguments)
+    pub fn execute(&self, arguments: &[CString], env: &[CString]) -> io::Result<!> {
+        imp::Executable::execute(&self.0, arguments, env)
     }
 }
 
