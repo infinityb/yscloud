@@ -1,4 +1,5 @@
 #![feature(async_await)]
+use std::collections::BTreeMap;
 use std::fs::File;
 use std::net::TcpListener as StdTcpListener;
 use std::os::unix::io::{FromRawFd, RawFd};
@@ -6,7 +7,6 @@ use std::os::unix::net::UnixListener as StdUnixListener;
 use std::sync::Arc;
 
 use clap::{App, Arg};
-
 use futures::future::{self, FutureExt};
 use futures::stream::StreamExt;
 use log::warn;
@@ -21,12 +21,16 @@ use yscloud_config_model::AppConfiguration;
 
 mod abortable_stream;
 mod config;
+mod dialer;
+mod erased;
 mod mgmt_proto;
+mod resolver;
 mod sni;
 mod state_track;
 
-use self::config::{MemoryResolver, Resolver};
+use self::config::ResolverInit;
 use self::mgmt_proto::{start_management_client, AsciiManagerServer};
+use self::resolver::{NetworkLocation, BackendManager, BackendSet};
 use self::sni::{start_client, SocketAddrPair};
 use self::state_track::SessionManager;
 
@@ -144,9 +148,25 @@ fn main() {
     let mgmt_listener: UnixListener =
         UnixListener::from_std(management_sock, &Handle::default()).unwrap();
 
-    let resolver: MemoryResolver = serde_json::from_str(&extras_str).unwrap();
-    let resolver: Box<dyn Resolver + Send + Sync + Unpin + 'static> = Box::new(resolver);
-    let resolver: Arc<dyn Resolver + Send + Sync + Unpin + 'static> = resolver.into();
+    let resolver_init: ResolverInit = serde_json::from_str(&extras_str).unwrap();
+
+    let mut backends = BTreeMap::new();
+    for (k, v) in resolver_init.hostnames.into_iter() {
+        backends.insert(
+            k,
+            BackendSet {
+                locations: vec![NetworkLocation {
+                    use_haproxy_header_v: v.use_haproxy_header,
+                    address: v.location,
+                    stats: (),
+                }],
+            },
+        );
+    }
+
+    let resolver = Lock::new(BackendManager { backends: Arc::new(backends) });
+    let mgmt_resolver = Lock::clone(&resolver);
+    let data_resolver = resolver;
 
     let sessman = Lock::new(SessionManager::new());
     let mgmt_sessman = Lock::clone(&sessman);
@@ -156,6 +176,8 @@ fn main() {
         let mut mgmt_incoming = mgmt_listener.incoming();
         loop {
             let sessman = mgmt_sessman.clone();
+            let resolver = mgmt_resolver.clone();
+
             let (next_item, tail) = mgmt_incoming.into_future().await;
             mgmt_incoming = tail;
 
@@ -167,7 +189,7 @@ fn main() {
             let socket = socket.expect("FIXME");
             let framed = AsciiManagerServer::new().framed(socket);
             tokio::spawn(async {
-                if let Err(err) = start_management_client(sessman, framed).await {
+                if let Err(err) = start_management_client(sessman, resolver, framed).await {
                     warn!("management client terminated: {}", err);
                 }
             });
@@ -211,7 +233,7 @@ fn main() {
             };
             tokio::spawn(start_client(
                 data_sessman.clone(),
-                resolver.clone(),
+                data_resolver.clone(),
                 client_conn,
                 socket,
             ));

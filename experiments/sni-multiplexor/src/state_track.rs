@@ -11,6 +11,7 @@ use crate::sni::SocketAddrPair;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionState {
     Handshaking,
+    BackendResolving,
     BackendConnecting,
     Connected,
     ShutdownRead,
@@ -22,6 +23,7 @@ impl SessionState {
     pub fn as_str(&self) -> &'static str {
         match *self {
             SessionState::Handshaking => "handshaking",
+            SessionState::BackendResolving => "backend-resolving",
             SessionState::BackendConnecting => "backend-connecting",
             SessionState::Connected => "connected",
             SessionState::ShutdownRead => "shutdown-read",
@@ -43,6 +45,8 @@ pub struct SessionExport {
     pub client_conn: SocketAddrPair,
     pub backend_name: Option<String>,
     // pub backend_conn: Option<SocketAddrPair>,
+    pub backend_resolve_start: Option<Instant>,
+    pub backend_resolve_latency: Option<Duration>,
     pub backend_connect_start: Option<Instant>,
     pub backend_connect_latency: Option<Duration>,
     pub state: SessionState,
@@ -72,6 +76,8 @@ impl Session {
                 client_conn: client_addr,
                 backend_name: None,
                 // backend_conn: None,
+                backend_resolve_latency: None,
+                backend_resolve_start: None,
                 backend_connect_latency: None,
                 backend_connect_start: None,
                 state: SessionState::Handshaking,
@@ -129,12 +135,22 @@ impl SessionManager {
             .collect()
     }
 
-    pub fn mark_backend_connecting(&mut self, session_id: &Ksuid, backend_name: &str) {
+    pub fn mark_backend_resolving(&mut self, session_id: &Ksuid, backend_name: &str) {
+        let inst = self.sessions.get_mut(session_id).unwrap();
+        inst.exportable.state = SessionState::BackendResolving;
+        inst.exportable.backend_name = Some(backend_name.to_string());
+        inst.exportable.backend_resolve_start = Some(Instant::now());
+
+        self.cleanup();
+    }
+
+    pub fn mark_backend_connecting(&mut self, session_id: &Ksuid) {
         let inst = self.sessions.get_mut(session_id).unwrap();
         inst.exportable.state = SessionState::BackendConnecting;
-        inst.exportable.backend_name = Some(backend_name.to_string());
         inst.exportable.backend_connect_start = Some(Instant::now());
-
+        if let Some(start) = inst.exportable.backend_resolve_start {
+            inst.exportable.backend_resolve_latency = Some(start.elapsed());
+        }
         self.cleanup();
     }
 
@@ -151,6 +167,11 @@ impl SessionManager {
     pub fn mark_shutdown_read(&mut self, session_id: &Ksuid) {
         let inst = self.sessions.get_mut(session_id).unwrap();
         inst.exportable.state = if inst.exportable.state == SessionState::ShutdownWrite {
+            let key = (Instant::now() + Duration::new(30, 0), self.tie_break_ctr);
+            self.tie_break_ctr += 1;
+            self.tie_break_ctr &= 0x7FFF_FFFF;
+            self.removal_queue.insert(key, *session_id);
+
             SessionState::Shutdown
         } else {
             SessionState::ShutdownRead
@@ -162,6 +183,11 @@ impl SessionManager {
     pub fn mark_shutdown_write(&mut self, session_id: &Ksuid) {
         let inst = self.sessions.get_mut(session_id).unwrap();
         inst.exportable.state = if inst.exportable.state == SessionState::ShutdownRead {
+            let key = (Instant::now() + Duration::new(30, 0), self.tie_break_ctr);
+            self.tie_break_ctr += 1;
+            self.tie_break_ctr &= 0x7FFF_FFFF;
+            self.removal_queue.insert(key, *session_id);
+
             SessionState::Shutdown
         } else {
             SessionState::ShutdownWrite

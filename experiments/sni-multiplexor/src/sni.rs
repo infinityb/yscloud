@@ -2,7 +2,6 @@ use std::fmt::{self, Write as _Write};
 use std::fs::{remove_file, File};
 use std::io::{self, Write};
 use std::net::{SocketAddr, SocketAddrV4, SocketAddrV6};
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bytes::{Bytes, BytesMut};
@@ -14,7 +13,10 @@ use ksuid::Ksuid;
 use log::{debug, info, warn};
 use tokio::codec::{Decoder, Encoder};
 use tokio::future::FutureExt;
+use tokio::io::AsyncWriteExt;
 use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::net::tcp::TcpStream;
+use tokio::net::unix::UnixStream;
 use tokio::sync::Lock;
 
 use tls::{
@@ -25,7 +27,8 @@ use tls::{
 use crate::abortable_stream::{
     abortable_stream_pair, AbortTryStreamError, AbortableStreamFactory, AbortableTryStream,
 };
-use crate::config::Resolver;
+use crate::erased::NetworkStream;
+use crate::resolver::{BackendManager, NetworkLocationAddress, Resolver2};
 use crate::state_track::{Session, SessionManager};
 
 const DEFAULT_SNI_DETECTOR_MAX_LEN: usize = 20480;
@@ -332,12 +335,17 @@ async fn register_sessman(
 
 pub async fn start_client<A>(
     mut sessman: Lock<SessionManager>,
-    connector: Arc<dyn Resolver + Send + Sync + Unpin>,
+    mut backend_man: Lock<BackendManager>,
     client_addr: SocketAddrPair,
     socket: A,
 ) where
     A: AsyncRead + AsyncWrite + Unpin + 'static,
 {
+    let backend_man: BackendManager = {
+        let backend_man = backend_man.lock().await;
+        BackendManager::clone(&*backend_man)
+    };
+
     let handle = register_sessman(&mut sessman, &client_addr).await;
     info!(
         "{}: started connection from {}",
@@ -400,25 +408,15 @@ pub async fn start_client<A>(
     let first_frame = match first_frame {
         Some(Ok(frame)) => frame,
         Some(Err(AbortTryStreamError::Err(err))) => {
-            warn!(
-                "{} error: {}",
-                handle.session_id.fmt_base62(),
-                err
-            );
+            warn!("{} error: {}", handle.session_id.fmt_base62(), err);
             return;
         }
         Some(Err(AbortTryStreamError::Aborted(..))) => {
-            warn!(
-                "{} was aborted",
-                handle.session_id.fmt_base62()
-            );
+            warn!("{} was aborted", handle.session_id.fmt_base62());
             return;
         }
         None => {
-            warn!(
-                "{} error: got EOF",
-                handle.session_id.fmt_base62()
-            );
+            warn!("{} error: got EOF", handle.session_id.fmt_base62());
             return;
         }
     };
@@ -440,7 +438,7 @@ pub async fn start_client<A>(
 
     {
         let mut sessman = sessman.lock().await;
-        sessman.mark_backend_connecting(&handle.session_id, &hostname);
+        sessman.mark_backend_resolving(&handle.session_id, &hostname);
     }
 
     info!(
@@ -449,39 +447,101 @@ pub async fn start_client<A>(
         hostname,
     );
 
-    if !connector.use_haproxy_header(&hostname) {
-        // clears the whole thing.
-        proxy_buf.take();
-    }
-
-    let vv = connector
-        .resolve(&hostname)
-        .timeout(Duration::from_secs(3))
-        .await;
-
-    let socket = match vv {
-        Ok(Ok(vv)) => vv,
-        Ok(Err(err)) => {
-            warn!(
-                "{}: backend connection error: {}",
-                handle.session_id.fmt_base62(),
-                err,
-            );
-            let mut sessman = sessman.lock().await;
-            sessman.mark_shutdown(&handle.session_id);
-            return;
-        }
+    let bset = match backend_man.resolve(&hostname).await {
+        Ok(bset) => bset,
         Err(err) => {
-            warn!(
-                "{}: failed to connect to backend within allotted time: {}",
-                handle.session_id.fmt_base62(),
-                err,
-            );
+            warn!("unimplemented - sending TLS error: {:?}", err);
             let mut sessman = sessman.lock().await;
             sessman.mark_shutdown(&handle.session_id);
             return;
         }
     };
+    assert_eq!(bset.locations.len(), 1);
+    let backend = &bset.locations[0];
+
+    {
+        let mut sessman = sessman.lock().await;
+        sessman.mark_backend_connecting(&handle.session_id);
+    }
+
+    if !backend.use_haproxy_header() {
+        // clears the whole thing.
+        proxy_buf.take();
+    }
+
+    let mut backend_sock = match backend.address {
+        NetworkLocationAddress::Unix(ref addr) => {
+            match UnixStream::connect(addr)
+                .timeout(Duration::from_secs(3))
+                .await
+            {
+                Ok(Ok(conn)) => Box::new(conn) as NetworkStream,
+                Ok(Err(err)) => {
+                    warn!(
+                        "{}: backend connection error: {}",
+                        handle.session_id.fmt_base62(),
+                        err,
+                    );
+                    warn!("unimplemented - sending TLS error: {:?}", err);
+                    let mut sessman = sessman.lock().await;
+                    sessman.mark_shutdown(&handle.session_id);
+                    return;
+                }
+                Err(err) => {
+                    warn!("unimplemented - sending TLS error for timeout: {:?}", err);
+                    warn!(
+                        "{}: failed to connect to backend within allotted time: {}",
+                        handle.session_id.fmt_base62(),
+                        err,
+                    );
+                    let mut sessman = sessman.lock().await;
+                    sessman.mark_shutdown(&handle.session_id);
+                    return;
+                }
+            }
+        }
+        NetworkLocationAddress::Tcp(ref addr) => {
+            match TcpStream::connect(addr)
+                .timeout(Duration::from_secs(3))
+                .await
+            {
+                Ok(Ok(conn)) => Box::new(conn) as NetworkStream,
+                Ok(Err(err)) => {
+                    warn!(
+                        "{}: backend connection error: {}",
+                        handle.session_id.fmt_base62(),
+                        err,
+                    );
+                    warn!("unimplemented - sending TLS error: {:?}", err);
+                    let mut sessman = sessman.lock().await;
+                    sessman.mark_shutdown(&handle.session_id);
+                    return;
+                }
+                Err(err) => {
+                    warn!("unimplemented - sending TLS error for timeout: {:?}", err);
+                    warn!(
+                        "{}: failed to connect to backend within allotted time: {}",
+                        handle.session_id.fmt_base62(),
+                        err,
+                    );
+                    let mut sessman = sessman.lock().await;
+                    sessman.mark_shutdown(&handle.session_id);
+                    return;
+                }
+            }
+        }
+    };
+
+    if !proxy_buf.is_empty() {
+        if let Err(err) = backend_sock.write_all(&proxy_buf[..]).await {
+            warn!(
+                "{}: failed to write proxy header to backend: {}",
+                handle.session_id.fmt_base62(),
+                err,
+            );
+            return;
+        }
+    }
 
     {
         let mut sessman = sessman.lock().await;
@@ -494,7 +554,7 @@ pub async fn start_client<A>(
         duration_milliseconds(handle.start_time.elapsed())
     );
 
-    let (backend_sink, backend_stream) = SniPassCodec.framed(socket).split();
+    let (backend_sink, backend_stream) = SniPassCodec.framed(backend_sock).split();
     let backend_stream = handle.aborter.with_try_stream(backend_stream);
 
     let mut s2c_sessman = sessman.clone();
@@ -515,7 +575,11 @@ pub async fn start_client<A>(
         let mut sessman = s2c_sessman.lock().await;
         sessman.mark_shutdown_read(&handle.session_id);
 
-        info!("{} closed s2c after {:?}", handle.session_id.fmt_base62(), handle.start_time.elapsed());
+        info!(
+            "{} closed s2c after {:?}",
+            handle.session_id.fmt_base62(),
+            handle.start_time.elapsed()
+        );
     };
 
     let mut c2s_sessman = sessman.clone();
@@ -536,7 +600,11 @@ pub async fn start_client<A>(
         let mut sessman = c2s_sessman.lock().await;
         sessman.mark_shutdown_write(&handle.session_id);
 
-        info!("{} closed c2s after {:?}", handle.session_id.fmt_base62(), handle.start_time.elapsed());
+        info!(
+            "{} closed c2s after {:?}",
+            handle.session_id.fmt_base62(),
+            handle.start_time.elapsed()
+        );
     };
 
     let _: ((), ()) = future::join(server_to_client, client_to_server).await;
@@ -573,10 +641,7 @@ where
                 break;
             }
             Some(Err(AbortTryStreamError::Aborted(..))) => {
-                warn!(
-                    "{} was aborted",
-                    handle.session_id.fmt_base62()
-                );
+                warn!("{} was aborted", handle.session_id.fmt_base62());
                 break;
             }
             None => {
@@ -591,15 +656,19 @@ where
             match direction {
                 Direction::BackendToClient => {
                     sessman.handle_xmit_backend_to_client(&handle.session_id, bytes);
-                },
+                }
                 Direction::ClientToBackend => {
                     sessman.handle_xmit_client_to_backend(&handle.session_id, bytes);
-                },
+                }
             };
         }
-        
+
         if let Err(err) = sink.send(rec).await {
-            warn!("{}: aborting copy - sink send error {}", handle.session_id.fmt_base62(), err);
+            warn!(
+                "{}: aborting copy - sink send error {}",
+                handle.session_id.fmt_base62(),
+                err
+            );
             break;
         }
     }

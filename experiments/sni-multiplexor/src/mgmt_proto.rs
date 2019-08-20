@@ -9,6 +9,8 @@ use tokio::io::{AsyncRead, AsyncWrite};
 
 use tokio::sync::Lock;
 
+use crate::resolver::BackendManager;
+use crate::resolver::{NetworkLocation, NetworkLocationAddress};
 use crate::sni::SocketAddrPair;
 use crate::state_track::{SessionExport, SessionManager};
 
@@ -30,6 +32,18 @@ impl AsciiManagerServer {
 pub enum AsciiManagerRequest {
     PrintActiveSessions,
     DestroySession(Ksuid),
+    ReplaceBackend(ReplaceBackend),
+    DumpBackends,
+}
+
+pub struct ReplaceBackend {
+    hostname: String,
+    target_address: NetworkLocation,
+    flags: Vec<ReplaceBackendFlag>,
+}
+
+pub enum ReplaceBackendFlag {
+    UseHaproxy(i8),
 }
 
 fn destroy_session_from_str_iter<'a, I>(mut parts: I) -> Result<Ksuid, Error>
@@ -49,6 +63,84 @@ where
     Ok(ksuid)
 }
 
+fn replace_backend_from_str_iter<'a, I>(mut parts: I) -> Result<ReplaceBackend, Error>
+where
+    I: Iterator<Item = &'a str>,
+{
+    let hostname = parts.next().ok_or_else(|| MgmtProtocolError {
+        recoverable: true,
+        message: "replace-backend takes arguments: <hostname> <target-address> [...flags]".into(),
+    })?;
+    let address: NetworkLocationAddress = parts
+        .next()
+        .ok_or_else(|| MgmtProtocolError {
+            recoverable: true,
+            message: "replace-backend takes arguments: <hostname> <target-address> [...flags]"
+                .into(),
+        })?
+        .parse()
+        .map_err(|err| MgmtProtocolError {
+            recoverable: true,
+            message: format!("failed to parse target-address: {}", err),
+        })?;
+
+    let mut use_haproxy = None;
+    while let Some(flag) = parts.next() {
+        match flag {
+            "use-haproxy-v1" => {
+                if use_haproxy.is_some() {
+                    return Err(MgmtProtocolError {
+                        recoverable: true,
+                        message: "already set haproxy header".into(),
+                    }
+                    .into());
+                }
+                use_haproxy = Some(1);
+            }
+            "use-haproxy-v2" => {
+                if use_haproxy.is_some() {
+                    return Err(MgmtProtocolError {
+                        recoverable: true,
+                        message: "already set haproxy header".into(),
+                    }
+                    .into());
+                }
+                use_haproxy = Some(2);
+            }
+            _ => {
+                return Err(MgmtProtocolError {
+                    recoverable: true,
+                    message: format!("unknown flag: {:?}", flag),
+                }
+                .into());
+            }
+        }
+    }
+
+    let target_address = NetworkLocation {
+        use_haproxy_header_v: match use_haproxy {
+            None => false,
+            Some(1) => true,
+            Some(2) => {
+                return Err(MgmtProtocolError {
+                    recoverable: true,
+                    message: "use-haproxy-v2 not supported yet".into(),
+                }
+                .into());
+            }
+            _ => unreachable!(),
+        },
+        address,
+        stats: (),
+    };
+
+    Ok(ReplaceBackend {
+        hostname: hostname.into(),
+        target_address,
+        flags: Vec::new(),
+    })
+}
+
 impl FromStr for AsciiManagerRequest {
     type Err = Error;
 
@@ -61,8 +153,12 @@ impl FromStr for AsciiManagerRequest {
 
         match command {
             "print-active-sessions" => Ok(AsciiManagerRequest::PrintActiveSessions),
+            "dump-backends" => Ok(AsciiManagerRequest::DumpBackends),
             "destroy-session" => {
                 destroy_session_from_str_iter(parts).map(AsciiManagerRequest::DestroySession)
+            }
+            "replace-backend" => {
+                replace_backend_from_str_iter(parts).map(AsciiManagerRequest::ReplaceBackend)
             }
             _ => Err(MgmtProtocolError {
                 recoverable: true,
@@ -77,6 +173,7 @@ pub enum AsciiManagerResponse {
     PrintActive(Vec<SessionExport>),
     GenericOk,
     GenericError,
+    DumpBackends(BackendManager),
 }
 
 fn write_sock_addr_pair<W>(wri: &mut W, sap: &SocketAddrPair) -> io::Result<()>
@@ -175,6 +272,11 @@ impl Encoder for AsciiManagerServer {
             AsciiManagerResponse::GenericError => {
                 dst.extend_from_slice(b"ERROR\n");
             }
+            AsciiManagerResponse::DumpBackends(ref bm) => {
+                let data = serde_json::to_string(&*bm.backends).unwrap();
+                dst.extend_from_slice(data.as_bytes());
+                dst.extend_from_slice(b"\nOK\n");
+            }
         }
 
         Ok(())
@@ -216,6 +318,7 @@ impl Decoder for AsciiManagerServer {
 
 pub async fn start_management_client<A>(
     mut sessman: Lock<SessionManager>,
+    mut backends: Lock<BackendManager>,
     client: Framed<A, AsciiManagerServer>,
 ) -> Result<(), Error>
 where
@@ -233,10 +336,21 @@ where
             Some(item) => item,
             None => break,
         };
-        let item = item?;
+        let item = match item {
+            Ok(item) => item,
+            Err(err) => {
+                if let Some(mgmt_err) = err.downcast_ref::<MgmtProtocolError>() {
+                    if mgmt_err.recoverable {
+                        sink.send(AsciiManagerResponse::GenericError).await.unwrap();
+                        continue;
+                    }
+                }
+                return Err(err);
+            }
+        };
 
-        let response = handle_query(&mut sessman, item).await?;
-        sink.send(response).await;
+        let response = handle_query(&mut sessman, &mut backends, item).await?;
+        sink.send(response).await.unwrap();
     }
 
     Ok(())
@@ -244,17 +358,30 @@ where
 
 async fn handle_query(
     sessman: &mut Lock<SessionManager>,
+    backend_man: &mut Lock<BackendManager>,
     req: AsciiManagerRequest,
 ) -> Result<AsciiManagerResponse, Error> {
-    let mut sessions = sessman.lock().await;
     match req {
         AsciiManagerRequest::PrintActiveSessions => {
+            let sessions = sessman.lock().await;
             let sessions = sessions.get_sessions();
             Ok(AsciiManagerResponse::PrintActive(sessions))
         }
-        AsciiManagerRequest::DestroySession(ref sess_id) => match sessions.destroy(sess_id) {
-            Ok(()) => Ok(AsciiManagerResponse::GenericOk),
-            Err(()) => Ok(AsciiManagerResponse::GenericError),
-        },
+        AsciiManagerRequest::DestroySession(ref sess_id) => {
+            let mut sessions = sessman.lock().await;
+            match sessions.destroy(sess_id) {
+                Ok(()) => Ok(AsciiManagerResponse::GenericOk),
+                Err(()) => Ok(AsciiManagerResponse::GenericError),
+            }
+        }
+        AsciiManagerRequest::DumpBackends => {
+            let backends = backend_man.lock().await;
+            Ok(AsciiManagerResponse::DumpBackends(BackendManager::clone(&backends)))
+        }
+        AsciiManagerRequest::ReplaceBackend(repl) => {
+            let mut backends = backend_man.lock().await;
+            backends.replace_backend(&repl.hostname, repl.target_address);
+            Ok(AsciiManagerResponse::GenericOk)
+        }
     }
 }

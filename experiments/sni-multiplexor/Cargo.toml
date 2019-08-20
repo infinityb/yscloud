@@ -1,6 +1,6 @@
 [package]
 name = "sni-multiplexor"
-version = "0.1.7"
+version = "0.1.10"
 authors = ["Stacey Ell <stacey.ell@gmail.com>"]
 edition = "2018"
 
@@ -21,3 +21,4 @@ tokio = { version = "=0.2.0-alpha.2" }
 tokio-net = { version = "=0.2.0-alpha.2" }
 uuid = { version = "0.6", features = ["v4", "serde", "const_fn"] }
 yscloud-config-model = { path = "../../yscloud-config-model" }
+rand = "0.7"
