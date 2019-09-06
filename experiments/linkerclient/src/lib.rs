@@ -1,13 +1,13 @@
 use std::io;
 
-use sockets::{Connected, Listener};
+use sockets::{Connected, TcpListener};
 use yscloud_config_model::{AppConfiguration, ServiceFileDirection};
 
-pub fn get_listening_socket(cfg: &AppConfiguration, name: &str) -> io::Result<Listener> {
+pub fn get_listening_socket(cfg: &AppConfiguration, name: &str) -> io::Result<TcpListener> {
     for file in &cfg.files {
         if file.direction == ServiceFileDirection::ServingListening && file.service_name == name {
             // need to find a way to disallow duplication of this item
-            return Ok(unsafe { Listener::from_raw_fd(file.file_num) });
+            return Ok(unsafe { TcpListener::from_raw_fd(file.file_num) });
         }
     }
 
@@ -24,7 +24,7 @@ pub fn get_connected_socket(cfg: &AppConfiguration, name: &str) -> io::Result<Co
     unimplemented!("put in a not-found error here");
 }
 
-pub fn get_service(cfg: &AppConfiguration, name: &str) -> io::Result<Listener> {
+pub fn get_service(cfg: &AppConfiguration, name: &str) -> io::Result<TcpListener> {
     let mut connections = Vec::new();
     for file in &cfg.files {
         if file.direction == ServiceFileDirection::ServingConnected && file.service_name == name {
@@ -33,7 +33,7 @@ pub fn get_service(cfg: &AppConfiguration, name: &str) -> io::Result<Listener> {
         }
     }
     if !connections.is_empty() {
-        return Ok(Listener::fixed(connections));
+        return Ok(TcpListener::fixed(connections));
     }
     unimplemented!("put in a not-found erorr here");
 }

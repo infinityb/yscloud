@@ -65,7 +65,7 @@ fn hex_digit(c: u8) -> io::Result<u8> {
 /// [`EPOCH`](constant.EPOCH.html).
 ///
 /// The remaining 16 bytes is the randomly generated payload.
-#[derive(Clone, Copy, Ord, PartialOrd, Eq, PartialEq, Hash)]
+#[derive(Clone, Copy, Ord, PartialOrd, Eq, PartialEq, Hash, Debug)]
 pub struct Ksuid([u8; LEN]);
 
 impl Ksuid {

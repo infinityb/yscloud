@@ -12,7 +12,6 @@ use futures::stream::StreamExt;
 use log::warn;
 use log::LevelFilter;
 use serde::{Deserialize, Serialize};
-use tokio::codec::Decoder;
 use tokio::net::TcpListener;
 use tokio::net::UnixListener;
 use tokio::sync::Lock;
@@ -187,9 +186,10 @@ fn main() {
             };
 
             let socket = socket.expect("FIXME");
-            let framed = AsciiManagerServer::new().framed(socket);
+
+            let (socket_reader, socket_writer) = socket.split();
             tokio::spawn(async {
-                if let Err(err) = start_management_client(sessman, resolver, framed).await {
+                if let Err(err) = start_management_client(sessman, resolver, socket_reader, socket_writer).await {
                     warn!("management client terminated: {}", err);
                 }
             });
@@ -231,15 +231,21 @@ fn main() {
                     continue;
                 }
             };
+
+            let (client_reader, client_writer) = socket.split();
             tokio::spawn(start_client(
                 data_sessman.clone(),
                 data_resolver.clone(),
                 client_conn,
-                socket,
+                client_reader,
+                client_writer,
             ));
         }
     };
 
-    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let mut runtime_builder = tokio::runtime::Builder::new();
+    runtime_builder.panic_handler(|err| std::panic::resume_unwind(err));
+    let runtime = runtime_builder.build().unwrap();
+
     runtime.block_on(future::join(mgmt_server, data_server).map(|_| ()));
 }

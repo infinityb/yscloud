@@ -13,6 +13,5 @@ members = [
 	"ksuid/cli",
 	"linker",
 	"parsing/tls",
-	"publish-release",
 	"yscloud-config-model",
 ]

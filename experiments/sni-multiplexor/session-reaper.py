@@ -41,11 +41,11 @@ def load_sessions(fh):
 
 def get_sessions(path):
     subproc = subprocess.Popen(
-        ['/usr/bin/nc', '-U', path],
+        ['/bin/nc', '-U', path],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE)
     try:
-        subproc.stdin.write("print-active-sessions\n")
+        subproc.stdin.write("print-active-sessions\nquit\n")
         subproc.stdin.close()
         sessions = load_sessions(subproc.stdout)
     finally:
@@ -53,13 +53,15 @@ def get_sessions(path):
     return sessions
 
 
-def destroy_session(path, session_id):
+def destroy_sessions(path, session_ids):
     subproc = subprocess.Popen(
-        ['/usr/bin/nc', '-U', path],
+        ['/bin/nc', '-U', path],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE)
     try:
-        subproc.stdin.write("destroy-session {}\n".format(session_id))
+        for session_id in session_ids:
+            subproc.stdin.write("destroy-session {}\n".format(session_id))
+        subproc.stdin.write("quit\n")
         subproc.stdin.close()
         response = subproc.stdout.read()
     finally:
@@ -87,17 +89,19 @@ def print_session(sess):
 
 
 def main():
-    socket_path = 'tmp/mgmt'
+    socket_path = '/var/run/sni-multiplexor-mgmt'
     sessions = get_sessions(socket_path)
+    to_destroy = []
     for sess in sessions:
-        if sess.state.startswith('shutdown') and timedelta(minutes=10) < sess.last_xmit_ago:
+        if sess.state.startswith('shutdown-') and timedelta(minutes=10) < sess.last_xmit_ago:
             print_session(sess)
-            destroy_session(socket_path, sess.session_id)
+            to_destroy.append(sess.session_id)
     for sess in sessions:
         if sess.state == 'connected' and timedelta(hours=1) < sess.last_xmit_ago:
             print_session(sess)
-            destroy_session(socket_path, sess.session_id)
-
+            to_destroy.append(sess.session_id)
+    if to_destroy:
+        destroy_sessions(socket_path, to_destroy)
 
 if __name__ == '__main__':
     main()

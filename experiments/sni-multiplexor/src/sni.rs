@@ -1,6 +1,6 @@
 use std::fmt::{self, Write as _Write};
-use std::fs::{remove_file, File};
-use std::io::{self, Write};
+
+use std::io;
 use std::net::{SocketAddr, SocketAddrV4, SocketAddrV6};
 use std::time::{Duration, Instant};
 
@@ -18,6 +18,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::tcp::TcpStream;
 use tokio::net::unix::UnixStream;
 use tokio::sync::Lock;
+use tokio::codec::{FramedRead, FramedWrite};
 
 use tls::{
     extract_record, ByteIterRead, ClientHello, Extension, ExtensionServerName, Handshake,
@@ -107,16 +108,14 @@ impl Decoder for SniPassCodec {
 }
 
 pub struct SniDetectorCodec {
-    connection_id: Ksuid,
     max_length: usize,
     emitted_sni: bool,
     arena: Arena,
 }
 
 impl SniDetectorCodec {
-    pub fn new(connection_id: Ksuid) -> SniDetectorCodec {
+    pub fn new() -> SniDetectorCodec {
         SniDetectorCodec {
-            connection_id,
             max_length: DEFAULT_SNI_DETECTOR_MAX_LEN,
             emitted_sni: false,
             arena: Arena::with_capacity(2048),
@@ -186,7 +185,6 @@ impl Decoder for SniDetectorCodec {
                 Ok(Some(rec)) => rec,
                 Ok(None) => break,
                 Err(err) => {
-                    write_handshake_sample(&self.connection_id, &src[..]);
                     return Err(fixup_err(err));
                 }
             };
@@ -217,7 +215,6 @@ impl Decoder for SniDetectorCodec {
             {
                 Handshake::ClientHello(hello) => get_server_names(hello)?,
                 Handshake::Unknown(..) => {
-                    write_handshake_sample(&self.connection_id, &src[..]);
                     return Err(io::Error::new(io::ErrorKind::Other, ALERT_INTERNAL_ERROR));
                 }
             };
@@ -333,13 +330,16 @@ async fn register_sessman(
     }
 }
 
-pub async fn start_client<A>(
+
+pub async fn start_client<ClientRead, ClientWrite>(
     mut sessman: Lock<SessionManager>,
     mut backend_man: Lock<BackendManager>,
     client_addr: SocketAddrPair,
-    socket: A,
+    client_reader: ClientRead,
+    client_writer: ClientWrite,
 ) where
-    A: AsyncRead + AsyncWrite + Unpin + 'static,
+    ClientRead: AsyncRead + Unpin + 'static,
+    ClientWrite: AsyncWrite + Unpin + 'static,
 {
     let backend_man: BackendManager = {
         let backend_man = backend_man.lock().await;
@@ -347,15 +347,39 @@ pub async fn start_client<A>(
     };
 
     let handle = register_sessman(&mut sessman, &client_addr).await;
+    let session_id = handle.session_id;
+
+    match start_client_helper(handle, sessman.clone(), backend_man, client_addr, client_reader, client_writer).await {
+        Ok(()) => info!("{} terminated OK", session_id.fmt_base62()),
+        Err(()) => info!("{} terminated with error status", session_id.fmt_base62()),
+    }
+    {
+        let mut sessman = sessman.lock().await;
+        sessman.mark_shutdown(&session_id);
+    }
+}
+
+
+async fn start_client_helper<ClientRead, ClientWrite>(
+    handle: ClientHandle,
+    mut sessman: Lock<SessionManager>,
+    backend_man: BackendManager,
+    client_addr: SocketAddrPair,
+    client_reader: ClientRead,
+    client_writer: ClientWrite,
+) -> Result<(), ()>
+where
+    ClientRead: AsyncRead + Unpin + 'static,
+    ClientWrite: AsyncWrite + Unpin + 'static,
+{
     info!(
         "{}: started connection from {}",
         handle.session_id.fmt_base62(),
         client_addr.peer_addr()
     );
 
-    let (client_sink, client_stream) = SniDetectorCodec::new(handle.session_id)
-        .framed(socket)
-        .split();
+    let client_stream = FramedRead::new(client_reader, SniDetectorCodec::new());
+    let client_sink = FramedWrite::new(client_writer, SniDetectorCodec::new());
 
     let client_stream = handle.aborter.with_try_stream(client_stream);
 
@@ -396,12 +420,13 @@ pub async fn start_client<A>(
 
     let (first_frame, client_stream) = match frame_res {
         Ok(pair) => pair,
-        Err(..) => {
+        Err(err) => {
             warn!(
-                "{} timed out waiting for handshake",
-                handle.session_id.fmt_base62()
+                "{} timed out waiting for handshake: {}",
+                handle.session_id.fmt_base62(),
+                err,
             );
-            return;
+            return Err(());
         }
     };
 
@@ -409,15 +434,15 @@ pub async fn start_client<A>(
         Some(Ok(frame)) => frame,
         Some(Err(AbortTryStreamError::Err(err))) => {
             warn!("{} error: {}", handle.session_id.fmt_base62(), err);
-            return;
+            return Err(());
         }
         Some(Err(AbortTryStreamError::Aborted(..))) => {
             warn!("{} was aborted", handle.session_id.fmt_base62());
-            return;
+            return Err(());
         }
         None => {
             warn!("{} error: got EOF", handle.session_id.fmt_base62());
-            return;
+            return Err(());
         }
     };
 
@@ -432,7 +457,7 @@ pub async fn start_client<A>(
                 handle.session_id.fmt_base62(),
                 first_frame
             );
-            return;
+            return Err(());
         }
     }
 
@@ -451,9 +476,7 @@ pub async fn start_client<A>(
         Ok(bset) => bset,
         Err(err) => {
             warn!("unimplemented - sending TLS error: {:?}", err);
-            let mut sessman = sessman.lock().await;
-            sessman.mark_shutdown(&handle.session_id);
-            return;
+            return Err(());
         }
     };
     assert_eq!(bset.locations.len(), 1);
@@ -483,9 +506,7 @@ pub async fn start_client<A>(
                         err,
                     );
                     warn!("unimplemented - sending TLS error: {:?}", err);
-                    let mut sessman = sessman.lock().await;
-                    sessman.mark_shutdown(&handle.session_id);
-                    return;
+                    return Err(());
                 }
                 Err(err) => {
                     warn!("unimplemented - sending TLS error for timeout: {:?}", err);
@@ -493,10 +514,8 @@ pub async fn start_client<A>(
                         "{}: failed to connect to backend within allotted time: {}",
                         handle.session_id.fmt_base62(),
                         err,
-                    );
-                    let mut sessman = sessman.lock().await;
-                    sessman.mark_shutdown(&handle.session_id);
-                    return;
+                    );                    
+                    return Err(());
                 }
             }
         }
@@ -512,10 +531,8 @@ pub async fn start_client<A>(
                         handle.session_id.fmt_base62(),
                         err,
                     );
-                    warn!("unimplemented - sending TLS error: {:?}", err);
-                    let mut sessman = sessman.lock().await;
-                    sessman.mark_shutdown(&handle.session_id);
-                    return;
+                    warn!("unimplemented - sending TLS error: {:?}", err);                    
+                    return Err(());
                 }
                 Err(err) => {
                     warn!("unimplemented - sending TLS error for timeout: {:?}", err);
@@ -523,10 +540,8 @@ pub async fn start_client<A>(
                         "{}: failed to connect to backend within allotted time: {}",
                         handle.session_id.fmt_base62(),
                         err,
-                    );
-                    let mut sessman = sessman.lock().await;
-                    sessman.mark_shutdown(&handle.session_id);
-                    return;
+                    );                    
+                    return Err(());
                 }
             }
         }
@@ -539,7 +554,8 @@ pub async fn start_client<A>(
                 handle.session_id.fmt_base62(),
                 err,
             );
-            return;
+            
+            return Err(());
         }
     }
 
@@ -568,13 +584,15 @@ pub async fn start_client<A>(
         )
         .await;
 
-        if let Err(err) = res {
-            warn!("{}: s2c error {}", handle.session_id.fmt_base62(), err);
-        }
-
         let mut sessman = s2c_sessman.lock().await;
         sessman.mark_shutdown_read(&handle.session_id);
 
+        if let Err(err) = res {
+            warn!("{}: s2c error {}", handle.session_id.fmt_base62(), err);
+            // sends the cancellation to the other copy
+            let _ = sessman.destroy(&handle.session_id);
+        }
+        
         info!(
             "{} closed s2c after {:?}",
             handle.session_id.fmt_base62(),
@@ -593,12 +611,14 @@ pub async fn start_client<A>(
         )
         .await;
 
-        if let Err(err) = res {
-            warn!("{}: c2s error {}", handle.session_id.fmt_base62(), err);
-        }
-
         let mut sessman = c2s_sessman.lock().await;
         sessman.mark_shutdown_write(&handle.session_id);
+
+        if let Err(err) = res {
+            warn!("{}: c2s error {}", handle.session_id.fmt_base62(), err);
+            // sends the cancellation to the other copy
+            let _ = sessman.destroy(&handle.session_id);
+        }
 
         info!(
             "{} closed c2s after {:?}",
@@ -608,6 +628,8 @@ pub async fn start_client<A>(
     };
 
     let _: ((), ()) = future::join(server_to_client, client_to_server).await;
+
+    Ok(())
 }
 
 #[allow(clippy::needless_lifetimes)]
@@ -624,6 +646,8 @@ where
     Si::Error: std::error::Error,
 {
     use futures::sink::SinkExt;
+
+    let mut res = Ok(());
 
     loop {
         let (value, stream_tail) = stream.into_future().await;
@@ -669,6 +693,9 @@ where
                 handle.session_id.fmt_base62(),
                 err
             );
+
+            res = Err("sink send error".into());
+
             break;
         }
     }
@@ -677,7 +704,7 @@ where
         .await
         .map_err(|e| format!("{}", e))?;
 
-    Ok(())
+    res
 }
 
 fn duration_milliseconds(dur: Duration) -> u64 {
@@ -685,21 +712,4 @@ fn duration_milliseconds(dur: Duration) -> u64 {
     out += u64::from(dur.subsec_nanos()) / 1_000_000;
     out += dur.as_secs() * 1_000;
     out
-}
-
-fn write_handshake_sample(connection_id: &Ksuid, handshake: &[u8]) {
-    let conn_id_str = connection_id.fmt_base62();
-    info!("logging bad handshake sample: {}", conn_id_str);
-    let filename = format!("bad-handshake-{}.bin", conn_id_str);
-    match File::create(&filename) {
-        Ok(mut file) => {
-            if let Err(err) = file.write_all(handshake) {
-                let _ = remove_file(&filename);
-                warn!("failed to write bad handshake sample: {}", err);
-            }
-        }
-        Err(err) => {
-            warn!("failed to create bad handshake sample: {}", err);
-        }
-    }
 }

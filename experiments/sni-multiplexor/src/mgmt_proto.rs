@@ -4,10 +4,11 @@ use std::str::FromStr;
 use bytes::BytesMut;
 use failure::{Error, Fail};
 use ksuid::Ksuid;
-use tokio::codec::{Decoder, Encoder, Framed};
+use tokio::codec::{Decoder, Encoder};
+use tokio::codec::{FramedRead, FramedWrite};
 use tokio::io::{AsyncRead, AsyncWrite};
-
 use tokio::sync::Lock;
+use log::{warn, info};
 
 use crate::resolver::BackendManager;
 use crate::resolver::{NetworkLocation, NetworkLocationAddress};
@@ -29,21 +30,31 @@ impl AsciiManagerServer {
     }
 }
 
+#[derive(Debug)]
 pub enum AsciiManagerRequest {
     PrintActiveSessions,
     DestroySession(Ksuid),
     ReplaceBackend(ReplaceBackend),
     DumpBackends,
+    RemoveBackends(RemoveBackends),
+    Quit,
 }
 
+#[derive(Debug)]
 pub struct ReplaceBackend {
     hostname: String,
     target_address: NetworkLocation,
     flags: Vec<ReplaceBackendFlag>,
 }
 
+#[derive(Debug)]
 pub enum ReplaceBackendFlag {
     UseHaproxy(i8),
+}
+
+#[derive(Debug)]
+pub struct RemoveBackends {
+    hostname: String,
 }
 
 fn destroy_session_from_str_iter<'a, I>(mut parts: I) -> Result<Ksuid, Error>
@@ -141,6 +152,20 @@ where
     })
 }
 
+fn remove_backends_from_str_iter<'a, I>(mut parts: I) -> Result<RemoveBackends, Error>
+where
+    I: Iterator<Item = &'a str>,
+{
+    let hostname = parts.next().ok_or_else(|| MgmtProtocolError {
+        recoverable: true,
+        message: "replace-backend takes arguments: <hostname> <target-address> [...flags]".into(),
+    })?;
+
+    Ok(RemoveBackends {
+        hostname: hostname.into(),
+    })
+}
+
 impl FromStr for AsciiManagerRequest {
     type Err = Error;
 
@@ -160,6 +185,10 @@ impl FromStr for AsciiManagerRequest {
             "replace-backend" => {
                 replace_backend_from_str_iter(parts).map(AsciiManagerRequest::ReplaceBackend)
             }
+            "remove-backends" => {
+                remove_backends_from_str_iter(parts).map(AsciiManagerRequest::RemoveBackends)
+            }
+            "quit" => Ok(AsciiManagerRequest::Quit),
             _ => Err(MgmtProtocolError {
                 recoverable: true,
                 message: format!("unknown command: {}", value),
@@ -316,42 +345,63 @@ impl Decoder for AsciiManagerServer {
     }
 }
 
-pub async fn start_management_client<A>(
+pub async fn start_management_client<ClientRead, ClientWrite>(
     mut sessman: Lock<SessionManager>,
     mut backends: Lock<BackendManager>,
-    client: Framed<A, AsciiManagerServer>,
+    socket_reader: ClientRead,
+    socket_writer: ClientWrite,
 ) -> Result<(), Error>
 where
-    A: AsyncRead + AsyncWrite + Send + Unpin + 'static,
+    ClientRead: AsyncRead + Unpin + 'static,
+    ClientWrite: AsyncWrite + Unpin + 'static,
 {
     use futures::sink::SinkExt;
     use futures::stream::StreamExt;
 
-    let (mut sink, mut stream) = client.split();
+    let mut stream = FramedRead::new(socket_reader, AsciiManagerServer::new());
+    let mut sink = FramedWrite::new(socket_writer, AsciiManagerServer::new());
+
     loop {
         let (next_item, stream_tail) = stream.into_future().await;
         stream = stream_tail;
 
         let item = match next_item {
             Some(item) => item,
-            None => break,
+            None => {
+                break;
+            }
         };
         let item = match item {
             Ok(item) => item,
             Err(err) => {
                 if let Some(mgmt_err) = err.downcast_ref::<MgmtProtocolError>() {
                     if mgmt_err.recoverable {
-                        sink.send(AsciiManagerResponse::GenericError).await.unwrap();
-                        continue;
+                        if let Err(sink_err) = sink.send(AsciiManagerResponse::GenericError).await {
+                            warn!("failed to push to sink: {}", sink_err);
+                        } else {
+                            continue;
+                        }
                     }
                 }
                 return Err(err);
             }
         };
 
+        if let AsciiManagerRequest::Quit = item {
+            break;
+        }
+
         let response = handle_query(&mut sessman, &mut backends, item).await?;
-        sink.send(response).await.unwrap();
+        if let Err(sink_err) = sink.send(response).await {
+            warn!("failed to push to sink: {}", sink_err);
+        }
     }
+
+    if let Err(sink_err) = crate::abortable_stream::SinkCloser::new(sink).await {
+        warn!("failed to close sink: {}", sink_err);
+    }
+
+    info!("mgmt client close completed");
 
     Ok(())
 }
@@ -362,6 +412,7 @@ async fn handle_query(
     req: AsciiManagerRequest,
 ) -> Result<AsciiManagerResponse, Error> {
     match req {
+        AsciiManagerRequest::Quit => unreachable!(),
         AsciiManagerRequest::PrintActiveSessions => {
             let sessions = sessman.lock().await;
             let sessions = sessions.get_sessions();
@@ -381,6 +432,11 @@ async fn handle_query(
         AsciiManagerRequest::ReplaceBackend(repl) => {
             let mut backends = backend_man.lock().await;
             backends.replace_backend(&repl.hostname, repl.target_address);
+            Ok(AsciiManagerResponse::GenericOk)
+        }
+        AsciiManagerRequest::RemoveBackends(remo) => {
+            let mut backends = backend_man.lock().await;
+            backends.remove_backends(&remo.hostname);
             Ok(AsciiManagerResponse::GenericOk)
         }
     }

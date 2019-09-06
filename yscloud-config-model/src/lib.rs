@@ -165,6 +165,7 @@ pub struct SideCarServiceInfo {
 pub struct SocketInfo {
     pub mode: SocketMode,
     pub protocol: Protocol,
+    #[serde(default = "Default::default")]
     pub flags: Vec<SocketFlag>,
 }
 
@@ -225,7 +226,6 @@ pub struct ApplicationManifest {
     pub required_local_services: Vec<String>,
     pub permissions: Vec<Permission>,
 }
-
 
 #[derive(Serialize, Deserialize, Clone, Debug, Eq, PartialEq)]
 #[serde(rename_all = "kebab-case")]

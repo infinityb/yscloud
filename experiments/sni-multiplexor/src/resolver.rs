@@ -75,7 +75,7 @@ impl BackendManager {
         self.backends = Arc::new(backends);
     }
 
-    pub fn remove_backend(&mut self, hostname: &str) {
+    pub fn remove_backends(&mut self, hostname: &str) {
         let mut backends = BTreeMap::clone(&*self.backends);
         backends.remove(hostname);
         self.backends = Arc::new(backends);
