@@ -17,7 +17,11 @@ use users::{get_group_by_name, get_user_by_name};
 use super::super::OwnedFd;
 use super::posix_imp::relabel_file_descriptors;
 use crate::AppPreforkConfiguration;
+use crate::Void;
 
+use memfd::{MemFd, MemFdCreateFlag, MemFdOptions, SealFlag};
+
+#[derive(Debug)]
 pub struct Executable(OwnedFd);
 
 impl fmt::Display for Executable {
@@ -29,6 +33,59 @@ impl fmt::Display for Executable {
 impl AsRawFd for Executable {
     fn as_raw_fd(&self) -> RawFd {
         self.0.as_raw_fd()
+    }
+}
+
+fn nix_error_to_io_error(err: nix::Error) -> io::Error {
+    match err {
+        nix::Error::Sys(syserr) => io::Error::from_raw_os_error(syserr as i32),
+        nix::Error::InvalidPath => io::Error::new(io::ErrorKind::Other, "Invalid path (nix)"),
+        nix::Error::InvalidUtf8 => io::Error::new(io::ErrorKind::Other, "Invalid UTF-8 (nix)"),
+        nix::Error::UnsupportedOperation => {
+            io::Error::new(io::ErrorKind::Other, "Unsupported operation (nix)")
+        }
+    }
+}
+
+struct ExecutableFactory(MemFd);
+
+impl ExecutableFactory {
+    pub fn new(name: &str, capacity: i64) -> io::Result<ExecutableFactory> {
+        let mut memfd = MemFdOptions::new()
+            .cloexec(true)
+            .allow_sealing(true)
+            .with_capacity(capacity)
+            .open(name)
+            .map_err(|e| nix_error_to_io_error(e))?;
+
+        memfd
+            .seal(SealFlag::F_SEAL_SEAL | SealFlag::F_SEAL_SHRINK | SealFlag::F_SEAL_GROW)
+            .map_err(|e| nix_error_to_io_error(e))?;
+
+        Ok(ExecutableFactory(memfd))
+    }
+
+    pub fn validate_sha(&self, sha: &str) -> io::Result<()> {
+        // FIXME
+        warn!("STUB - sha validation not implemented");
+        Ok(())
+    }
+
+    pub fn finalize(self) -> Executable {
+        Executable(self.0)
+    }
+}
+
+impl io::Write for ExecutableFactory {
+    fn write(&mut self, data: &[u8]) -> io::Result<usize> {
+        use nix::unistd::write;
+
+        write(self.0.as_raw_fd(), data).map_err(nix_error_to_io_error)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        // we always immediately write to the backing storage, so we can leave this empty.
+        Ok(())
     }
 }
 
@@ -44,11 +101,11 @@ impl Executable {
         Ok(Executable(unsafe { OwnedFd::from_raw_fd(artifact_file) }))
     }
 
-    pub fn execute(&self, arguments: &[CString], env: &[CString]) -> io::Result<!> {
+    pub fn execute(&self, arguments: &[CString], env: &[CString]) -> io::Result<Void> {
         fexecve(self.0.as_raw_fd(), arguments, env)
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
 
-        // successful executions of fexecve don't return.
+        // successful invokations of fexecve don't return.
         unreachable!();
     }
 }
@@ -170,7 +227,7 @@ impl ExecExtrasBuilder {
     }
 }
 
-fn exec_artifact_child(ext: &ExecExtras, c: &AppPreforkConfiguration) -> io::Result<!> {
+fn exec_artifact_child(ext: &ExecExtras, c: &AppPreforkConfiguration) -> io::Result<Void> {
     let package_id = c.package_id.clone();
     let app_config = relabel_file_descriptors(&c)?;
     let tmpfile = open(

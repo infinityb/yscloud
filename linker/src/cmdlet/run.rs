@@ -1,5 +1,7 @@
 use std::collections::HashMap;
+use std::error::Error as StdError;
 use std::fs::File;
+use std::os::unix::io::AsRawFd;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -10,11 +12,21 @@ use log::{debug, info, trace, warn};
 use nix::sys::signal::{kill, Signal};
 use nix::sys::wait::{waitpid, WaitStatus};
 use nix::unistd::Pid;
+use uuid::Uuid;
 
-use yscloud_config_model::DeploymentManifest;
+use sockets::socketpair_raw;
 
+use crate::artifact::{direct_load_artifact, find_artifact};
 use crate::platform::exec_artifact;
-use crate::reify_service_connections;
+use crate::{
+    bind_service, AppPreforkConfiguration, ExecExtras, ExecSomething, ServiceFileDescriptor,
+};
+
+use yscloud_config_model::{
+    DeployedApplicationManifest, DeploymentManifest, FileDescriptorRemote, Protocol,
+    PublicServiceBinder, Sandbox, ServiceFileDirection, SideCarServiceInfo, SocketInfo, SocketMode,
+};
+
 use crate::{CARGO_PKG_VERSION, SUBCOMMAND_RUN};
 
 pub fn get_subcommand() -> App<'static, 'static> {
@@ -38,9 +50,16 @@ pub fn get_subcommand() -> App<'static, 'static> {
                 .takes_value(true),
         )
         .arg(
+            Arg::with_name("registry")
+                .long("registry")
+                .value_name("DIR")
+                .help("an artifact registry directory containing metadata about the available artifacts")
+                .takes_value(true),
+        )
+        .arg(
             Arg::with_name("artifacts")
                 .long("artifacts")
-                .value_name("DIR")
+                .value_name("DIR-or-URL")
                 .help("an artifact directory containing dependencies of the manifest")
                 .required(true)
                 .takes_value(true),
@@ -53,6 +72,10 @@ pub fn get_subcommand() -> App<'static, 'static> {
                 .multiple(true)
                 .takes_value(true),
         )
+}
+
+fn is_url(maybe_url: &str) -> bool {
+    maybe_url.starts_with("http://") || maybe_url.starts_with("https://")
 }
 
 pub fn main(matches: &clap::ArgMatches) {
@@ -82,6 +105,10 @@ pub fn main(matches: &clap::ArgMatches) {
     let mut target_deployment_manifest =
         serde_json::from_reader::<_, DeploymentManifest>(rdr).unwrap();
     target_deployment_manifest.path_overrides = overrides;
+
+    if is_url(&artifacts) {
+        // download artifacts somewhere
+    }
 
     let reified =
         reify_service_connections(&target_deployment_manifest, artifacts, &approot).unwrap();
@@ -187,4 +214,149 @@ pub fn main(matches: &clap::ArgMatches) {
     if child_exited_nonzero {
         std::process::exit(1);
     }
+}
+
+fn reify_service_connections(
+    dm: &DeploymentManifest,
+    artifact_path: &str,
+    approot: &Path,
+) -> Result<Vec<crate::ExecSomething>, Box<dyn StdError>> {
+    let mut instances = HashMap::<Uuid, ExecSomething>::new();
+    let mut instance_components = HashMap::<Uuid, &DeployedApplicationManifest>::new();
+    let mut instance_by_package = HashMap::<&str, Uuid>::new();
+
+    for component in &dm.components {
+        let artifact = if let Some(path) = dm.path_overrides.get(&component.package_id) {
+            warn!(
+                "because of override, trying to find package {:?} @ {}",
+                component.package_id, path
+            );
+            direct_load_artifact(&path)?
+        } else {
+            find_artifact(artifact_path, &component.package_id, &component.version)?
+        };
+
+        let instance_id = Uuid::new_v4();
+
+        let mut builder = ExecExtras::builder();
+
+        let mut workdir = approot.to_owned();
+        workdir.push(&dm.deployment_name);
+        workdir.push(&component.package_id);
+        builder.set_workdir(&workdir).unwrap();
+
+        if let Sandbox::UnixUserConfinement(ref user, ref group) = component.sandbox {
+            builder.set_user(user).unwrap();
+            builder.set_group(group).unwrap();
+        }
+
+        instances.insert(
+            instance_id,
+            ExecSomething {
+                extras: builder.build(),
+                cfg: AppPreforkConfiguration {
+                    package_id: component.package_id.clone(),
+                    artifact,
+                    version: format!("{}", component.version),
+                    instance_id,
+                    files: Default::default(),
+                    extras: component.extras.clone(),
+                },
+            },
+        );
+        instance_components.insert(instance_id, component);
+        instance_by_package.insert(&component.package_id, instance_id);
+    }
+
+    for ps in &dm.public_services {
+        let instance_id = instance_by_package
+            .get(&*ps.service_id.package_id)
+            .ok_or_else(|| {
+                format!(
+                    "internal error: unknown package {:?}",
+                    ps.service_id.package_id
+                )
+            })?;
+
+        let instance = instances
+            .get_mut(instance_id)
+            .ok_or_else(|| format!("internal error: unknown instance {:?}", instance_id))?;
+
+        info!(
+            "binding public service {} to {:?}",
+            ps.service_id.service_name, ps.binder
+        );
+        let service_sock = bind_service(&ps.binder)?;
+        info!(
+            "binded public service {} to {:?} - fd = {}",
+            ps.service_id.service_name,
+            ps.binder,
+            service_sock.as_raw_fd(),
+        );
+
+        instance.cfg.files.push(ServiceFileDescriptor {
+            file: service_sock,
+            direction: ServiceFileDirection::ServingListening,
+            service_name: ps.service_id.service_name.clone(),
+            remote: FileDescriptorRemote::Socket(SocketInfo {
+                mode: SocketMode::Listening,
+                protocol: Protocol::Stream,
+                flags: match ps.binder {
+                    PublicServiceBinder::NativePortBinder(ref np) => np.flags.clone(),
+                    PublicServiceBinder::UnixDomainBinder(ref ub) => ub.flags.clone(),
+                    PublicServiceBinder::WebServiceBinder(ref ws) => ws.flags.clone(),
+                },
+            }),
+        });
+    }
+
+    for (local_instance_id, local_cfg) in &instance_components {
+        for ls in &local_cfg.required_local_services {
+            let remote_instance_id = instance_by_package
+                .get(&*ls.package_id)
+                .ok_or_else(|| format!("internal error: unknown package {:?}", ls.package_id))?;
+
+            let remote_cfg = instance_components.get(remote_instance_id).ok_or_else(|| {
+                format!("internal error: unknown instance {:?}", remote_instance_id)
+            })?;
+
+            let (local_sock, remote_sock) = socketpair_raw()?;
+
+            {
+                let local_instance = instances.get_mut(local_instance_id).ok_or_else(|| {
+                    format!("internal error: unknown instance {:?}", local_instance_id)
+                })?;
+
+                local_instance.cfg.files.push(ServiceFileDescriptor {
+                    file: local_sock,
+                    direction: ServiceFileDirection::Consuming,
+                    service_name: ls.service_name.clone(),
+                    remote: FileDescriptorRemote::SideCarService(SideCarServiceInfo {
+                        instance_id: *remote_instance_id,
+                        package_id: remote_cfg.package_id.clone(),
+                        version: remote_cfg.version.clone(),
+                    }),
+                });
+            }
+
+            {
+                let remote_instance = instances.get_mut(remote_instance_id).ok_or_else(|| {
+                    format!("internal error: unknown instance {:?}", remote_instance_id)
+                })?;
+
+                remote_instance.cfg.files.push(ServiceFileDescriptor {
+                    file: remote_sock,
+                    direction: ServiceFileDirection::ServingConnected,
+                    service_name: ls.service_name.clone(),
+                    remote: FileDescriptorRemote::SideCarService(SideCarServiceInfo {
+                        instance_id: *local_instance_id,
+                        package_id: local_cfg.package_id.clone(),
+                        version: local_cfg.version.clone(),
+                    }),
+                });
+            }
+        }
+    }
+
+    Ok(instances.into_iter().map(|(_, v)| v).collect())
 }

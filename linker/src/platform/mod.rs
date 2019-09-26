@@ -5,7 +5,7 @@ use std::path::Path;
 
 use nix::unistd::Pid;
 
-use crate::AppPreforkConfiguration;
+use crate::{AppPreforkConfiguration, Void};
 
 #[cfg(target_os = "linux")]
 mod linux;
@@ -29,6 +29,51 @@ pub use self::imp::{ExecExtras, ExecExtrasBuilder};
 pub const EXTENSION: &str = imp::EXTENSION;
 pub const PLATFORM_TRIPLES: &[&str] = imp::PLATFORM_TRIPLES;
 
+pub struct ExecutableFactory(imp::ExecutableFactory);
+
+impl ExecutableFactory {
+    pub fn new(name: &str, capacity: i64) -> io::Result<ExecutableFactory> {
+        imp::ExecutableFactory::new(name, capacity)
+            .map(ExecutableFactory)
+    }
+
+    pub fn validate_sha(&self, sha: &str) -> io::Result<()> {
+        self.0.validate_sha(sha)
+    }
+
+    pub fn finalize(self) -> Executable {
+        Executable(self.0.finalize())
+    }
+}
+
+impl io::Write for ExecutableFactory {
+    #[inline]
+    fn write(&mut self, data: &[u8]) -> io::Result<usize> {
+        self.0.write(data)
+    }
+
+    #[inline]
+    fn flush(&mut self) -> io::Result<()> {
+        self.0.flush()
+    }
+
+    #[inline]
+    fn write_vectored(&mut self, bufs: &[io::IoSlice]) -> io::Result<usize> {
+        self.0.write_vectored(bufs)
+    }
+
+    #[inline]
+    fn write_all(&mut self, buf: &[u8]) -> io::Result<()> {
+        self.0.write_all(buf)
+    }
+
+    #[inline]
+    fn write_fmt(&mut self, fmt: fmt::Arguments) -> io::Result<()> {
+        self.0.write_fmt(fmt)
+    }
+}
+
+#[derive(Debug)]
 pub struct Executable(imp::Executable);
 
 impl Executable {
@@ -39,7 +84,7 @@ impl Executable {
         imp::Executable::open(path).map(Executable)
     }
 
-    pub fn execute(&self, arguments: &[CString], env: &[CString]) -> io::Result<!> {
+    pub fn execute(&self, arguments: &[CString], env: &[CString]) -> io::Result<Void> {
         imp::Executable::execute(&self.0, arguments, env)
     }
 }

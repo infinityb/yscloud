@@ -1,10 +1,9 @@
 use std::fs::File;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use clap::{App, Arg, SubCommand};
 use log::{debug, trace};
 use yscloud_config_model::{ApplicationDeployment, ApplicationManifest};
-
 
 use crate::{CARGO_PKG_VERSION, SUBCOMMAND_CREATE_RELEASE};
 
@@ -62,9 +61,8 @@ pub fn main(matches: &clap::ArgMatches) {
         let am: ApplicationManifest = serde_json::from_reader(&mut rdr).unwrap();
 
         println!("{:?}", am);
-    }    
+    }
 }
-
 
 fn found_package_ids(ad: &ApplicationDeployment) -> Vec<String> {
     ad.service_implementations.values().cloned().collect()
