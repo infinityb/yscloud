@@ -5,12 +5,15 @@ use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
+use digest::FixedOutput;
 use log::{info, warn};
 use nix::unistd::{execve, fork, lseek, unlink, write, ForkResult, Pid, Whence};
 use rand::{thread_rng, Rng};
+use sha2::Sha256;
 use tempfile::{tempdir, TempDir};
 
 use super::posix_imp::relabel_file_descriptors;
+pub use super::posix_imp::run_reified;
 use crate::AppPreforkConfiguration;
 use crate::Void;
 
@@ -24,6 +27,7 @@ pub struct ExecutableFactory {
     backing_storage: File,
     fully_qualified_path: PathBuf,
     temporary_dir: TempDir,
+    sha_state: Sha256,
 }
 
 impl ExecutableFactory {
@@ -31,16 +35,30 @@ impl ExecutableFactory {
         let temporary_dir = tempdir()?;
         let fully_qualified_path = temporary_dir.path().join(name);
         let backing_storage = File::create(&fully_qualified_path)?;
+
+        let metadata = backing_storage.metadata()?;
+        let permissions = metadata.permissions();
+        backing_storage.set_permissions(permissions)?;
+
         Ok(ExecutableFactory {
             backing_storage,
             fully_qualified_path,
             temporary_dir,
+            sha_state: Default::default(),
         })
     }
 
-    pub fn validate_sha(&self, sha: &str) -> io::Result<()> {
-        // FIXME
-        warn!("STUB - sha validation not implemented");
+    pub fn validate_sha(&self, expect_sha: &str) -> io::Result<()> {
+        let sha_result = self.sha_state.clone().fixed_result();
+        let mut scratch = [0; 256 / 8 * 2];
+
+        let got_sha = crate::util::hexify(&mut scratch[..], &sha_result[..]).unwrap();
+
+        if expect_sha != got_sha {
+            let msg = format!("sha mismatch {} != {}", expect_sha, got_sha);
+            return Err(io::Error::new(io::ErrorKind::Other, msg));
+        }
+
         Ok(())
     }
 
@@ -55,27 +73,17 @@ impl ExecutableFactory {
 impl io::Write for ExecutableFactory {
     #[inline]
     fn write(&mut self, data: &[u8]) -> io::Result<usize> {
-        self.backing_storage.write(data)
+        let written = self.backing_storage.write(data)?;
+
+        let sha_written = self.sha_state.write(&data[..written])?;
+        assert_eq!(sha_written, written);
+
+        Ok(written)
     }
 
     #[inline]
     fn flush(&mut self) -> io::Result<()> {
         self.backing_storage.flush()
-    }
-
-    #[inline]
-    fn write_vectored(&mut self, bufs: &[io::IoSlice]) -> io::Result<usize> {
-        self.backing_storage.write_vectored(bufs)
-    }
-
-    #[inline]
-    fn write_all(&mut self, buf: &[u8]) -> io::Result<()> {
-        self.backing_storage.write_all(buf)
-    }
-
-    #[inline]
-    fn write_fmt(&mut self, fmt: fmt::Arguments) -> io::Result<()> {
-        self.backing_storage.write_fmt(fmt)
     }
 }
 

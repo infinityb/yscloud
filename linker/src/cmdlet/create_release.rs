@@ -5,20 +5,16 @@ use clap::{App, Arg, SubCommand};
 use log::{debug, trace};
 use yscloud_config_model::{ApplicationDeployment, ApplicationManifest};
 
-use crate::{CARGO_PKG_VERSION, SUBCOMMAND_CREATE_RELEASE};
+use super::common;
+use crate::CARGO_PKG_VERSION;
+
+pub const SUBCOMMAND_NAME: &str = "create-release";
 
 pub fn get_subcommand() -> App<'static, 'static> {
-    SubCommand::with_name(SUBCOMMAND_CREATE_RELEASE)
+    SubCommand::with_name(SUBCOMMAND_NAME)
         .version(CARGO_PKG_VERSION)
         .about("press a release")
-        .arg(
-            Arg::with_name("registry")
-                .long("registry")
-                .value_name("DIR")
-                .help("The artifact registry to use")
-                .required(true)
-                .takes_value(true),
-        )
+        .arg(common::registry())
         .arg(
             Arg::with_name("deployment-templates")
                 .long("deployment-templates")

@@ -9,12 +9,13 @@ edition = "2018"
 sockets = { path = "../experiments/sockets" }
 yscloud-config-model = { path = "../yscloud-config-model" }
 memfd = { path = "../infra/memfd" }
+owned_fd = { path = "../infra/owned_fd" }
 
 # external 
 clap = "2.32"
 env_logger = "0.6"
 log = "0.4"
-nix = "0.13"
+nix = "0.14"
 rand = "*"
 semver = { version = "0.9.0", features = ["serde"] }
 serde = { version = "1.0", features = ["derive"] }
@@ -27,3 +28,6 @@ futures-preview = "=0.3.0-alpha.18"
 failure = "0.1.5"
 reqwest = "0.9.20"
 tokio = "=0.2.0-alpha.4"
+sha2 = "0.8.0"
+sha3 = "0.8.2"
+digest = "0.8.0"

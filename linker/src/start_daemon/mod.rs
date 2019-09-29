@@ -1,18 +1,18 @@
 use failure::Fallible;
 use semver::Version;
 use std::collections::HashMap;
+use std::convert::TryInto;
 use std::error::Error as StdError;
+use std::fs::File;
 use std::io;
 use std::os::unix::io::AsRawFd;
 use std::path::Path;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::convert::TryInto;
-use std::fs::File;
 
 use futures::future::{Future, FutureExt};
-use log::{info, warn};
+use log::{error, info, warn};
 use sockets::socketpair_raw;
 use uuid::Uuid;
 use yscloud_config_model::{
@@ -20,34 +20,39 @@ use yscloud_config_model::{
     PublicServiceBinder, Sandbox, ServiceFileDirection, SideCarServiceInfo, SocketInfo, SocketMode,
 };
 
-use crate::platform::{ExecutableFactory, Executable};
+use crate::platform::{Executable, ExecutableFactory};
 use crate::registry::{FileRegistry, RegistryEntry};
 use crate::{
-    artifact::direct_load_artifact, artifact::find_artifact, bind_service, AppPreforkConfiguration,
-    ExecExtras, ExecSomething, ServiceFileDescriptor,
+    artifact::direct_load_artifact, bind_service, AppPreforkConfiguration, ExecExtras,
+    ExecSomething, ServiceFileDescriptor,
 };
 
-mod artifact_loader;
+const DEFAULT_MAX_ARTIFACT_SIZE: u64 = 50 * 1 << 20; // 50 MB
 
 pub fn start(cfg: Config) {
     let registry = FileRegistry::new(&cfg.registry);
 
     let rdr = File::open("example-deployment-manifest.json").unwrap();
-    let target_deployment_manifest =
+    let mut target_deployment_manifest =
         serde_json::from_reader::<_, DeploymentManifest>(rdr).unwrap();
+
+    target_deployment_manifest.path_overrides = cfg.overrides.clone();
 
     let fut = download_components(&cfg, &registry, &target_deployment_manifest);
     let rt = tokio::runtime::Runtime::new().unwrap();
-    let xx = rt.block_on(fut);
-    println!("xx = {:?}", xx);
+    let xx = rt.block_on(fut).unwrap();
+    let reified = reify_service_connections(&target_deployment_manifest, xx, &cfg.approot).unwrap();
+    crate::platform::run_reified(reified);
 }
 
 #[derive(Clone)]
 pub struct Config {
     pub approot: PathBuf,
+    // this might be a remote resource or a local one - our type is incorrect here.
     pub artifacts: String,
-    pub registry: String,
+    pub registry: PathBuf,
     pub control_socket: PathBuf,
+    pub overrides: HashMap<String, String>,
 }
 
 #[derive(Debug)]
@@ -108,12 +113,11 @@ async fn download_components(
 
     // registry lookups
     let reg_entries = fetch_component_metadata(reg, &dm).await?;
-
     let reg_entries = Arc::new(reg_entries);
-    let mut futures: Vec<Pin<Box<dyn Future<Output = Fallible<(PackageKey, Component)>> + Send>>> =
-        vec![];
 
     // artifact fetch
+    let mut futures: Vec<Pin<Box<dyn Future<Output = Fallible<(PackageKey, Component)>> + Send>>> =
+        vec![];
     for component in &dm.components {
         let pkg_key = PackageKey {
             package_id: component.package_id.clone(),
@@ -144,7 +148,8 @@ async fn download_components(
             futures.push(
                 async move {
                     let executable =
-                        find_artifact(&cfg, &*reg_entries, &pkg_key.package_id, &pkg_key.version).await?;
+                        find_artifact(&cfg, &*reg_entries, &pkg_key.package_id, &pkg_key.version)
+                            .await?;
 
                     //
 
@@ -169,9 +174,7 @@ async fn download_components(
                 package_id: package_id.to_string(),
                 version: version.clone(),
             })
-            .ok_or_else(|| {
-                io::Error::new(io::ErrorKind::NotFound, "unregistered")
-            })?;
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "unregistered"))?;
 
         let mut artifact_specific: Option<(&str, &str)> = None;
         for p in crate::platform::PLATFORM_TRIPLES {
@@ -187,12 +190,12 @@ async fn download_components(
         ))?;
 
         let uri = format!(
-            "{}/{}-{}-{}",
+            "{}/{}-v{}-{}",
             cfg.artifacts, package_id, version, platform_triple
         );
         let filename = &uri[cfg.artifacts.len() + 1..];
 
-
+        info!("fetching {} from {}", package_id, uri);
         // FIXME: async
         let mut response = reqwest::get(&uri)?;
         // FIXME: add this information to the registry.
@@ -200,18 +203,26 @@ async fn download_components(
             io::Error::new(io::ErrorKind::NotFound, "no content-length on server")
         })?;
 
+        if DEFAULT_MAX_ARTIFACT_SIZE < content_length {
+            error!(
+                "file-size of {} is {} bytes - this exceeds the maximum artifact size",
+                package_id, content_length
+            );
+            return Err(io::Error::new(io::ErrorKind::Other, "artifact too large").into());
+        }
+
+        info!("file-size of {} is {} bytes", package_id, content_length);
+
         let mut fac = ExecutableFactory::new(filename, content_length.try_into()?)?;
         response.copy_to(&mut fac)?;
-
         fac.validate_sha(&sha)?;
-
         Ok(fac.finalize())
     }
 }
 
 fn reify_service_connections(
     dm: &DeploymentManifest,
-    artifact_path: &str,
+    mut component_artifacts: HashMap<PackageKey, Component>,
     approot: &Path,
 ) -> Result<Vec<crate::ExecSomething>, Box<dyn StdError>> {
     let mut instances = HashMap::<Uuid, ExecSomething>::new();
@@ -219,15 +230,14 @@ fn reify_service_connections(
     let mut instance_by_package = HashMap::<&str, Uuid>::new();
 
     for component in &dm.components {
-        let artifact = if let Some(path) = dm.path_overrides.get(&component.package_id) {
-            warn!(
-                "because of override, trying to find package {:?} @ {}",
-                component.package_id, path
-            );
-            direct_load_artifact(&path)?
-        } else {
-            find_artifact(artifact_path, &component.package_id, &component.version)?
+        let pkg_key = PackageKey {
+            package_id: component.package_id.clone(),
+            version: component.version.clone(),
         };
+
+        let component_artifact = component_artifacts
+            .remove(&pkg_key)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "internal error?"))?;
 
         let instance_id = Uuid::new_v4();
 
@@ -249,7 +259,7 @@ fn reify_service_connections(
                 extras: builder.build(),
                 cfg: AppPreforkConfiguration {
                     package_id: component.package_id.clone(),
-                    artifact,
+                    artifact: component_artifact.executable,
                     version: format!("{}", component.version),
                     instance_id,
                     files: Default::default(),

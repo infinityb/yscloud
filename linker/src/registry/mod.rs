@@ -13,8 +13,8 @@ use semver::{Version, VersionReq};
 pub struct FileRegistry(Arc<Registry>);
 
 impl FileRegistry {
-    pub fn new(base_path: &str) -> FileRegistry {
-        let base_path: PathBuf = AsRef::<Path>::as_ref(base_path).to_owned();
+    pub fn new(base_path: &Path) -> FileRegistry {
+        let base_path: PathBuf = base_path.to_owned();
         let opener: Box<dyn RegistryOpen + Send + Sync + 'static> =
             Box::new(FileRegistryOpen { base_path });
 
@@ -73,7 +73,7 @@ impl RegistryOpen for FileRegistryOpen {
         let mut sha256s: HashMap<String, String> = Default::default();
 
         println!("open file: {}", path.display());
-        let mut file = File::open(&path)?;
+        let file = File::open(&path)?;
         for line in BufReader::new(file).lines() {
             let line = line?;
             let line = line.trim();
@@ -83,11 +83,10 @@ impl RegistryOpen for FileRegistryOpen {
 
             let mut line_parts = line.splitn(2, "  ");
             let sha256 = line_parts.next().unwrap();
-            let host_triple = line_parts.next()
-                .ok_or_else(|| {
-                    io::Error::new(io::ErrorKind::Other, "invalid sha file")
-                })?;
-    
+            let host_triple = line_parts
+                .next()
+                .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "invalid sha file"))?;
+
             sha256s.insert(host_triple.to_string(), sha256.to_string());
         }
 
@@ -129,9 +128,8 @@ impl Registry {
             }
         }
 
-        let winner = current_winner.ok_or_else(|| {
-            io::Error::new(io::ErrorKind::Other, "no valid versions")
-        })?;
+        let winner = current_winner
+            .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "no valid versions"))?;
         self.load_version(package_id, &winner)
     }
 }

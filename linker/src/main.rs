@@ -5,33 +5,32 @@ use env_logger::Builder;
 use log::{debug, error, info, trace, warn, LevelFilter};
 use uuid::Uuid;
 
-use sockets::OwnedFd;
+use owned_fd::OwnedFd;
 use yscloud_config_model::{
     AppConfiguration, FileDescriptorInfo, FileDescriptorRemote, PublicServiceBinder,
     ServiceFileDirection,
 };
 
-pub enum Void {}
-
-use crate::platform::{ExecExtras, Executable};
+pub mod platform;
 
 mod artifact;
 mod bind;
 mod cmdlet;
-mod daemon;
-pub mod platform;
+mod publish_artifact;
 mod registry;
+mod start_daemon;
+mod util;
 
-const SUBCOMMAND_CREATE_RELEASE: &str = "create-release";
-// const SUBCOMMAND_EXPORT_MANIFEST: &str = "export-manifest";
-const SUBCOMMAND_RUN: &str = "run";
-const SUBCOMMAND_START_DAEMON: &str = "start-daemon";
+use crate::platform::{ExecExtras, Executable};
+
+pub enum Void {}
 
 const CARGO_PKG_VERSION: &str = env!("CARGO_PKG_VERSION");
 const CARGO_PKG_NAME: &str = env!("CARGO_PKG_NAME");
 
 fn main() {
-    let matches = App::new("yscloud-linker")
+    use self::cmdlet::{create_release, publish_artifact, run, start_daemon};
+    let matches = App::new(CARGO_PKG_NAME)
         .version(CARGO_PKG_VERSION)
         .author("Stacey Ell <stacey.ell@gmail.com>")
         .about("Microservice/sidecar linker and privilege separation")
@@ -48,62 +47,60 @@ fn main() {
                 .multiple(true)
                 .help("Sets the level of verbosity for all packages (debugging)"),
         )
-        .subcommand(cmdlet::create_release::get_subcommand())
-        .subcommand(cmdlet::run::get_subcommand())
-        .subcommand(cmdlet::daemon::get_subcommand())
+        .subcommand(create_release::get_subcommand())
+        .subcommand(publish_artifact::get_subcommand())
+        .subcommand(run::get_subcommand())
+        .subcommand(start_daemon::get_subcommand())
         .get_matches();
 
+    let mut print_test_logging = false;
     let mut builder = Builder::from_default_env();
     builder.default_format_module_path(true);
-    match matches.occurrences_of("v") {
-        0 => builder.filter_module(CARGO_PKG_NAME, LevelFilter::Error),
-        1 => builder.filter_module(CARGO_PKG_NAME, LevelFilter::Warn),
-        2 => builder.filter_module(CARGO_PKG_NAME, LevelFilter::Info),
-        3 => builder.filter_module(CARGO_PKG_NAME, LevelFilter::Debug),
-        4 | _ => builder.filter_module(CARGO_PKG_NAME, LevelFilter::Trace),
+
+    let mut verbosity = matches.occurrences_of("v");
+    let debugging = matches.occurrences_of("d");
+    if verbosity < debugging {
+        verbosity = debugging;
+    }
+    if 4 < verbosity {
+        print_test_logging = true;
+    }
+
+    match debugging {
+        0 => builder.filter_level(LevelFilter::Error),
+        1 => builder.filter_level(LevelFilter::Warn),
+        2 => builder.filter_level(LevelFilter::Info),
+        3 => builder.filter_level(LevelFilter::Debug),
+        _ => builder.filter_level(LevelFilter::Trace),
     };
-    match matches.occurrences_of("d") {
-        0 => {
-            builder.filter_module(CARGO_PKG_NAME, LevelFilter::Error);
-            builder.filter(None, LevelFilter::Error);
-        }
-        1 => {
-            builder.filter_module(CARGO_PKG_NAME, LevelFilter::Warn);
-            builder.filter(None, LevelFilter::Warn);
-        }
-        2 => {
-            builder.filter_module(CARGO_PKG_NAME, LevelFilter::Info);
-            builder.filter(None, LevelFilter::Info);
-        }
-        3 => {
-            builder.filter_module(CARGO_PKG_NAME, LevelFilter::Debug);
-            builder.filter(None, LevelFilter::Debug);
-        }
-        4 | _ => {
-            builder.filter_module(CARGO_PKG_NAME, LevelFilter::Trace);
-            builder.filter(None, LevelFilter::Trace);
-        }
+
+    match verbosity {
+        0 => builder.filter_module("yscloud_linker", LevelFilter::Error),
+        1 => builder.filter_module("yscloud_linker", LevelFilter::Warn),
+        2 => builder.filter_module("yscloud_linker", LevelFilter::Info),
+        3 => builder.filter_module("yscloud_linker", LevelFilter::Debug),
+        _ => builder.filter_module("yscloud_linker", LevelFilter::Trace),
     };
+
     builder.init();
 
-    trace!("logger initialized - trace check");
-    debug!("logger initialized - debug check");
-    info!("logger initialized - info check");
-    warn!("logger initialized - warn check");
-    error!("logger initialized - error check");
-
-    match matches.subcommand() {
-        (SUBCOMMAND_CREATE_RELEASE, Some(args)) => {
-            cmdlet::create_release::main(args);
-        }
-        (SUBCOMMAND_RUN, Some(args)) => {
-            cmdlet::run::main(args);
-        }
-        (SUBCOMMAND_START_DAEMON, Some(args)) => {
-            cmdlet::daemon::main(args);
-        }
-        _ => panic!("bad argument parse"),
+    if print_test_logging {
+        trace!("logger initialized - trace check");
+        debug!("logger initialized - debug check");
+        info!("logger initialized - info check");
+        warn!("logger initialized - warn check");
+        error!("logger initialized - error check");
     }
+
+    let (sub_name, args) = matches.subcommand();
+    let main_function = match sub_name {
+        create_release::SUBCOMMAND_NAME => create_release::main,
+        publish_artifact::SUBCOMMAND_NAME => publish_artifact::main,
+        run::SUBCOMMAND_NAME => run::main,
+        start_daemon::SUBCOMMAND_NAME => start_daemon::main,
+        _ => panic!("bad argument parse"),
+    };
+    main_function(args.expect("subcommand args"));
 }
 
 pub struct AppPreforkConfiguration {
@@ -132,7 +129,7 @@ fn bind_service(binder: &PublicServiceBinder) -> io::Result<OwnedFd> {
     }
 }
 
-struct ExecSomething {
+pub struct ExecSomething {
     extras: ExecExtras,
     cfg: AppPreforkConfiguration,
 }

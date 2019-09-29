@@ -9,7 +9,7 @@ use nix::sys::socket::{
 use nix::sys::stat::{fchmodat, FchmodatFlags, Mode};
 use nix::unistd::unlink;
 
-use sockets::OwnedFd;
+use owned_fd::OwnedFd;
 use yscloud_config_model::{NativePortBinder, UnixDomainBinder};
 
 pub fn bind_tcp_socket(np: &NativePortBinder) -> io::Result<OwnedFd> {

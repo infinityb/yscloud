@@ -2,24 +2,26 @@ use std::error::Error as StdError;
 use std::ffi::CString;
 use std::fmt;
 use std::io;
-use std::os::unix::io::FromRawFd;
-use std::os::unix::io::{AsRawFd, RawFd};
+use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use log::{info, warn};
+use digest::FixedOutput;
+use log::{debug, info, warn};
 use nix::fcntl::{open, OFlag};
 use nix::sys::stat::Mode;
 use nix::unistd::{fexecve, fork, lseek64, write, ForkResult, Gid, Pid, Uid, Whence};
+use sha2::Sha256;
 use users::{get_group_by_name, get_user_by_name};
 
-use super::super::OwnedFd;
 use super::posix_imp::relabel_file_descriptors;
+pub use super::posix_imp::run_reified;
 use crate::AppPreforkConfiguration;
 use crate::Void;
 
-use memfd::{MemFd, MemFdCreateFlag, MemFdOptions, SealFlag};
+use memfd::{MemFd, MemFdOptions, SealFlag};
+use owned_fd::OwnedFd;
 
 #[derive(Debug)]
 pub struct Executable(OwnedFd);
@@ -47,40 +49,59 @@ fn nix_error_to_io_error(err: nix::Error) -> io::Error {
     }
 }
 
-struct ExecutableFactory(MemFd);
+pub struct ExecutableFactory {
+    mem_fd: MemFd,
+    sha_state: Sha256,
+}
 
 impl ExecutableFactory {
     pub fn new(name: &str, capacity: i64) -> io::Result<ExecutableFactory> {
-        let mut memfd = MemFdOptions::new()
+        let mut mem_fd = MemFdOptions::new()
             .cloexec(true)
             .allow_sealing(true)
             .with_capacity(capacity)
+            .set_mode(Mode::S_IRWXU | Mode::S_IRGRP | Mode::S_IXGRP | Mode::S_IROTH | Mode::S_IXOTH)
             .open(name)
             .map_err(|e| nix_error_to_io_error(e))?;
 
-        memfd
+        mem_fd
             .seal(SealFlag::F_SEAL_SEAL | SealFlag::F_SEAL_SHRINK | SealFlag::F_SEAL_GROW)
             .map_err(|e| nix_error_to_io_error(e))?;
 
-        Ok(ExecutableFactory(memfd))
+        Ok(ExecutableFactory {
+            mem_fd,
+            sha_state: Default::default(),
+        })
     }
 
-    pub fn validate_sha(&self, sha: &str) -> io::Result<()> {
-        // FIXME
-        warn!("STUB - sha validation not implemented");
+    pub fn validate_sha(&self, expect_sha: &str) -> io::Result<()> {
+        let sha_result = self.sha_state.clone().fixed_result();
+        let mut scratch = [0; 256 / 8 * 2];
+
+        let got_sha = crate::util::hexify(&mut scratch[..], &sha_result[..]).unwrap();
+
+        debug!("checking sha: expecting: {}, got: {}", expect_sha, got_sha);
+        if expect_sha != got_sha {
+            let msg = format!("sha mismatch {} != {}", expect_sha, got_sha);
+            return Err(io::Error::new(io::ErrorKind::Other, msg));
+        }
+
         Ok(())
     }
 
     pub fn finalize(self) -> Executable {
-        Executable(self.0)
+        Executable(self.mem_fd.into_owned_fd())
     }
 }
 
 impl io::Write for ExecutableFactory {
     fn write(&mut self, data: &[u8]) -> io::Result<usize> {
-        use nix::unistd::write;
+        let written = write(self.mem_fd.as_raw_fd(), data).map_err(nix_error_to_io_error)?;
 
-        write(self.0.as_raw_fd(), data).map_err(nix_error_to_io_error)
+        let sha_written = self.sha_state.write(&data[..written])?;
+        assert_eq!(sha_written, written);
+
+        Ok(written)
     }
 
     fn flush(&mut self) -> io::Result<()> {
@@ -148,6 +169,13 @@ where
 
 impl SandboxingStrategy for UserChangeStrategy {
     fn preexec(&self) -> io::Result<()> {
+        if let Some(ref wd) = self.workdir {
+            std::fs::create_dir_all(wd)?;
+
+            nix::unistd::chown(wd, self.set_user, self.set_group)
+                .map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
+        }
+
         if let Some(gid) = self.set_group {
             info!("setting gid = {:?}", gid);
             nix::unistd::setgid(gid).map_err(io_other)?;

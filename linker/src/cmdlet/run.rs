@@ -3,44 +3,32 @@ use std::error::Error as StdError;
 use std::fs::File;
 use std::os::unix::io::AsRawFd;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
-use std::thread;
 
 use clap::{App, Arg, SubCommand};
-use log::{debug, info, trace, warn};
-use nix::sys::signal::{kill, Signal};
-use nix::sys::wait::{waitpid, WaitStatus};
-use nix::unistd::Pid;
+use log::{info, trace, warn};
 use uuid::Uuid;
 
 use sockets::socketpair_raw;
-
-use crate::artifact::{direct_load_artifact, find_artifact};
-use crate::platform::exec_artifact;
-use crate::{
-    bind_service, AppPreforkConfiguration, ExecExtras, ExecSomething, ServiceFileDescriptor,
-};
-
 use yscloud_config_model::{
     DeployedApplicationManifest, DeploymentManifest, FileDescriptorRemote, Protocol,
     PublicServiceBinder, Sandbox, ServiceFileDirection, SideCarServiceInfo, SocketInfo, SocketMode,
 };
 
-use crate::{CARGO_PKG_VERSION, SUBCOMMAND_RUN};
+use super::common;
+use crate::artifact::{direct_load_artifact, find_artifact};
+use crate::{
+    bind_service, AppPreforkConfiguration, ExecExtras, ExecSomething, ServiceFileDescriptor,
+};
+
+use crate::CARGO_PKG_VERSION;
+
+pub const SUBCOMMAND_NAME: &str = "run";
 
 pub fn get_subcommand() -> App<'static, 'static> {
-    SubCommand::with_name(SUBCOMMAND_RUN)
+    SubCommand::with_name(SUBCOMMAND_NAME)
         .version(CARGO_PKG_VERSION)
         .about("link and run a deployment")
-        .arg(
-            Arg::with_name("approot")
-                .long("approot")
-                .value_name("DIR")
-                .help("an application state directory root")
-                .required(true)
-                .takes_value(true),
-        )
+        .arg(common::approot())
         .arg(
             Arg::with_name("manifest")
                 .long("manifest")
@@ -49,29 +37,9 @@ pub fn get_subcommand() -> App<'static, 'static> {
                 .required(true)
                 .takes_value(true),
         )
-        .arg(
-            Arg::with_name("registry")
-                .long("registry")
-                .value_name("DIR")
-                .help("an artifact registry directory containing metadata about the available artifacts")
-                .takes_value(true),
-        )
-        .arg(
-            Arg::with_name("artifacts")
-                .long("artifacts")
-                .value_name("DIR-or-URL")
-                .help("an artifact directory containing dependencies of the manifest")
-                .required(true)
-                .takes_value(true),
-        )
-        .arg(
-            Arg::with_name("artifact-override")
-                .long("artifact-override")
-                .value_name("PACKAGE_ID:PATH")
-                .help("Override a Package ID with some other path")
-                .multiple(true)
-                .takes_value(true),
-        )
+        .arg(common::registry())
+        .arg(common::artifacts())
+        .arg(common::artifact_override())
 }
 
 fn is_url(maybe_url: &str) -> bool {
@@ -113,107 +81,7 @@ pub fn main(matches: &clap::ArgMatches) {
     let reified =
         reify_service_connections(&target_deployment_manifest, artifacts, &approot).unwrap();
 
-    #[derive(Clone, Debug)]
-    struct ChildInfo {
-        package_name: String,
-        sent_kill: Arc<AtomicBool>,
-        running: Arc<AtomicBool>,
-    }
-
-    let mut pids = HashMap::<Pid, ChildInfo>::new();
-    for a in reified {
-        let package_id = a.cfg.package_id.clone();
-        let child = exec_artifact(&a.extras, a.cfg).unwrap();
-
-        debug!("made child: {} {:?}", package_id, child);
-        pids.insert(
-            child,
-            ChildInfo {
-                package_name: package_id,
-                sent_kill: Arc::new(AtomicBool::new(false)),
-                running: Arc::new(AtomicBool::new(true)),
-            },
-        );
-    }
-
-    fn kill_all(pids: &HashMap<Pid, ChildInfo>, second_kill: bool) {
-        for (pid, info) in pids {
-            if info.running.load(Ordering::SeqCst)
-                && (!info.sent_kill.load(Ordering::SeqCst) || second_kill)
-            {
-                if !second_kill {
-                    info.sent_kill.store(true, Ordering::SeqCst);
-                }
-                info!("sending {} ({}) SIGTERM", pid, info.package_name);
-                let sent_kill = kill(*pid, Signal::SIGTERM).is_ok();
-                info!(
-                    "sent {} ({}) SIGTERM, successful: {}",
-                    pid, info.package_name, sent_kill
-                );
-            }
-        }
-    }
-
-    use signal_hook::iterator::Signals;
-    let signals = Signals::new(&[signal_hook::SIGINT]).unwrap();
-
-    let kill_targets = pids.clone();
-    thread::spawn(move || {
-        if let Some(sig) = signals.forever().next() {
-            signals.close();
-            info!("got {}, signaling to children to terminate", sig);
-            kill_all(&kill_targets, false);
-        }
-        if let Some(sig) = signals.forever().next() {
-            signals.close();
-            info!(
-                "got {}, signaling to children to terminate (2nd attempt)",
-                sig
-            );
-            kill_all(&kill_targets, true);
-        }
-    });
-
-    let mut remaining_children = pids.len();
-    let mut child_exited_nonzero = false;
-    while 0 < remaining_children {
-        match waitpid(None, None) {
-            Ok(WaitStatus::Exited(pid, exit_code)) => {
-                let child_info = &pids[&pid];
-                info!("child {} exited {}", child_info.package_name, exit_code);
-                if exit_code != 0 {
-                    child_exited_nonzero = true;
-                }
-                remaining_children -= 1;
-                child_info.running.store(false, Ordering::SeqCst);
-                kill_all(&pids, false);
-            }
-            // literally why.
-            Ok(WaitStatus::Signaled(pid, sig, cored)) => {
-                let child_info = &pids[&pid];
-                info!(
-                    "child {} exited via signal {}",
-                    child_info.package_name, sig
-                );
-                remaining_children -= 1;
-                if cored {
-                    // we might also want to detect bad exit signals?
-                    child_exited_nonzero = true;
-                }
-                child_info.running.store(false, Ordering::SeqCst);
-                kill_all(&pids, false);
-            }
-            Ok(ws) => {
-                warn!("waitpid got an unexpected {:?}", ws);
-            }
-            Err(err) => {
-                panic!("waitpid err {}", err);
-            }
-        };
-    }
-    if child_exited_nonzero {
-        std::process::exit(1);
-    }
+    crate::platform::run_reified(reified);
 }
 
 fn reify_service_connections(

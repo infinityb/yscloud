@@ -25,7 +25,7 @@ mod posix;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 use self::posix as posix_imp;
 
-pub use self::imp::{ExecExtras, ExecExtrasBuilder};
+pub use self::imp::{run_reified, ExecExtras, ExecExtrasBuilder};
 pub const EXTENSION: &str = imp::EXTENSION;
 pub const PLATFORM_TRIPLES: &[&str] = imp::PLATFORM_TRIPLES;
 
@@ -33,8 +33,7 @@ pub struct ExecutableFactory(imp::ExecutableFactory);
 
 impl ExecutableFactory {
     pub fn new(name: &str, capacity: i64) -> io::Result<ExecutableFactory> {
-        imp::ExecutableFactory::new(name, capacity)
-            .map(ExecutableFactory)
+        imp::ExecutableFactory::new(name, capacity).map(ExecutableFactory)
     }
 
     pub fn validate_sha(&self, sha: &str) -> io::Result<()> {
