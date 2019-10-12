@@ -14,7 +14,7 @@ pub enum SocketFlag {
     BehindHaproxy,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct DeploymentManifest {
     pub deployment_name: String,
