@@ -1,3 +1,6 @@
+/example-deployment-manifest.json
+/tmp
+/log-*.jsonl
 /target
 **/*.rs.bk
 /test

@@ -6,11 +6,11 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 use digest::FixedOutput;
-use log::{info, warn};
 use nix::unistd::{execve, fork, lseek, unlink, write, ForkResult, Pid, Whence};
 use rand::{thread_rng, Rng};
 use sha2::Sha256;
 use tempfile::{tempdir, TempDir};
+use tracing::{event, Level};
 
 use super::posix_imp::relabel_file_descriptors;
 pub use super::posix_imp::run_reified;
@@ -204,7 +204,7 @@ fn exec_artifact_child(_e: &ExecExtras, c: AppPreforkConfiguration) -> io::Resul
     .map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
 
     if let Err(err) = unlink(&path as &str) {
-        warn!("failed to unlink temporary file {}: {}", path, err);
+        event!(Level::WARN, "failed to unlink temporary file {}: {}", path, err);
     }
 
     let data = serde_json::to_string(&app_config)?;
@@ -220,7 +220,7 @@ fn exec_artifact_child(_e: &ExecExtras, c: AppPreforkConfiguration) -> io::Resul
         CString::new(format!("{}", tmpfile)).unwrap(),
     ];
 
-    info!("running {} {:?} -- {}", package_id, arguments, data,);
+    event!(Level::INFO, "running {} {:?} -- {}", package_id, arguments, data,);
     execute_child(&ExecConfig {
         executable: c.artifact,
         arguments,
@@ -233,7 +233,7 @@ pub fn exec_artifact(e: &ExecExtras, c: AppPreforkConfiguration) -> io::Result<P
     match fork() {
         Ok(ForkResult::Child) => {
             if let Err(err) = exec_artifact_child(e, c) {
-                warn!("failed to execute: {:?}", err);
+                event!(Level::WARN, "failed to execute: {:?}", err);
                 std::process::exit(1);
             } else {
                 unreachable!();

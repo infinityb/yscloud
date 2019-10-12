@@ -5,10 +5,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
 
-use log::{debug, info, warn};
 use nix::sys::signal::{kill, Signal};
 use nix::sys::wait::{waitpid, WaitStatus};
 use nix::unistd::Pid;
+use tracing::{Level, event, span};
 
 use super::imp;
 use crate::platform::exec_artifact;
@@ -27,13 +27,14 @@ pub fn relabel_file_descriptors(c: &AppPreforkConfiguration) -> io::Result<AppCo
     for f in &c.files {
         let file_num = f.file.as_raw_fd() as usize;
         if keep_map.len() < file_num {
-            warn!(
+            event!(Level::WARN,
                 "a keep-file is over {} - are we leaking file descriptors?",
                 keep_map.len()
             );
             continue;
         }
-        debug!(
+        event!(
+            Level::DEBUG,
             "keeping {} for {}: {:?}",
             file_num, c.artifact, f.service_name
         );
@@ -41,7 +42,7 @@ pub fn relabel_file_descriptors(c: &AppPreforkConfiguration) -> io::Result<AppCo
     }
     for (i, keep) in keep_map.iter().enumerate() {
         if !*keep && nix::unistd::close(i as i32).is_ok() {
-            debug!("closed {} for {}:{}", i, c.package_id, c.instance_id);
+            event!(Level::DEBUG, "closed {} for {}:{}", i, c.package_id, c.instance_id);
         }
     }
 
@@ -71,12 +72,17 @@ pub fn run_reified(reified: Vec<crate::ExecSomething>) {
         running: Arc<AtomicBool>,
     }
 
+    let span = span!(Level::INFO, "run_reified");
+    let _span_entered = span.enter();
+
     let mut pids = HashMap::<Pid, ChildInfo>::new();
     for a in reified {
         let package_id = a.cfg.package_id.clone();
-        let child = exec_artifact(&a.extras, a.cfg).unwrap();
 
-        debug!("made child: {} {:?}", package_id, child);
+        event!(Level::DEBUG, package_id = &package_id[..], "creating process");
+        let child = exec_artifact(&a.extras, a.cfg).unwrap();
+        event!(Level::DEBUG, package_id = &package_id[..], child.pid = ?child, "created process");
+
         pids.insert(
             child,
             ChildInfo {
@@ -95,9 +101,9 @@ pub fn run_reified(reified: Vec<crate::ExecSomething>) {
                 if !second_kill {
                     info.sent_kill.store(true, Ordering::SeqCst);
                 }
-                info!("sending {} ({}) SIGTERM", pid, info.package_name);
+                event!(Level::INFO, "sending {} ({}) SIGTERM", pid, info.package_name);
                 let sent_kill = kill(*pid, Signal::SIGTERM).is_ok();
-                info!(
+                event!(Level::INFO, 
                     "sent {} ({}) SIGTERM, successful: {}",
                     pid, info.package_name, sent_kill
                 );
@@ -112,12 +118,12 @@ pub fn run_reified(reified: Vec<crate::ExecSomething>) {
     thread::spawn(move || {
         if let Some(sig) = signals.forever().next() {
             signals.close();
-            info!("got {}, signaling to children to terminate", sig);
+            event!(Level::INFO, "got {}, signaling to children to terminate", sig);
             kill_all(&kill_targets, false);
         }
         if let Some(sig) = signals.forever().next() {
             signals.close();
-            info!(
+            event!(Level::INFO, 
                 "got {}, signaling to children to terminate (2nd attempt)",
                 sig
             );
@@ -131,7 +137,7 @@ pub fn run_reified(reified: Vec<crate::ExecSomething>) {
         match waitpid(None, None) {
             Ok(WaitStatus::Exited(pid, exit_code)) => {
                 let child_info = &pids[&pid];
-                info!("child {} exited {}", child_info.package_name, exit_code);
+                event!(Level::INFO, "child {} exited {}", child_info.package_name, exit_code);
                 if exit_code != 0 {
                     child_exited_nonzero = true;
                 }
@@ -142,7 +148,7 @@ pub fn run_reified(reified: Vec<crate::ExecSomething>) {
             // literally why.
             Ok(WaitStatus::Signaled(pid, sig, cored)) => {
                 let child_info = &pids[&pid];
-                info!(
+                event!(Level::INFO, 
                     "child {} exited via signal {}",
                     child_info.package_name, sig
                 );
@@ -155,7 +161,7 @@ pub fn run_reified(reified: Vec<crate::ExecSomething>) {
                 kill_all(&pids, false);
             }
             Ok(ws) => {
-                warn!("waitpid got an unexpected {:?}", ws);
+                event!(Level::WARN,"waitpid got an unexpected {:?}", ws);
             }
             Err(err) => {
                 panic!("waitpid err {}", err);

@@ -4,13 +4,16 @@ use clap::{App, AppSettings, Arg};
 use env_logger::Builder;
 use log::{debug, error, info, trace, warn, LevelFilter};
 use uuid::Uuid;
-use slog::{Drain, slog_o, slog_info, slog_warn};
 
 use owned_fd::OwnedFd;
 use yscloud_config_model::{
     AppConfiguration, FileDescriptorInfo, FileDescriptorRemote, PublicServiceBinder,
     ServiceFileDirection,
 };
+
+use tracing::{event, Level};
+use tracing_subscriber::FmtSubscriber;
+use tracing_subscriber::filter::LevelFilter as TracingLevelFilter;
 
 pub mod platform;
 
@@ -30,13 +33,8 @@ const CARGO_PKG_VERSION: &str = env!("CARGO_PKG_VERSION");
 const CARGO_PKG_NAME: &str = env!("CARGO_PKG_NAME");
 
 fn main() {
-    let decorator = slog_term::TermDecorator::new().build();
-    let drain = slog_term::FullFormat::new(decorator).build().fuse();
-    let drain = slog_async::Async::new(drain).build().fuse();
-
-    let log_root = slog::Logger::root(drain, slog_o!());
-    slog_info!(log_root, "test info log"; "log-key" => true);
-    slog_warn!(log_root, "test info log"; "log-key" => true);
+    let mut my_subscriber_builder = FmtSubscriber::builder()
+        .with_ansi(true);
 
     use self::cmdlet::{create_release, publish_artifact, run, start_daemon};
     let matches = App::new(CARGO_PKG_NAME)
@@ -91,9 +89,26 @@ fn main() {
         _ => builder.filter_module("yscloud_linker", LevelFilter::Trace),
     };
 
+    match debugging {
+        0 => my_subscriber_builder = my_subscriber_builder.with_max_level(TracingLevelFilter::ERROR),
+        1 => my_subscriber_builder = my_subscriber_builder.with_max_level(TracingLevelFilter::WARN),
+        2 => my_subscriber_builder = my_subscriber_builder.with_max_level(TracingLevelFilter::INFO),
+        3 => my_subscriber_builder = my_subscriber_builder.with_max_level(TracingLevelFilter::DEBUG),
+        _ => my_subscriber_builder = my_subscriber_builder.with_max_level(TracingLevelFilter::TRACE),
+    };
+
+    tracing::subscriber::set_global_default(my_subscriber_builder.finish())
+        .expect("setting tracing default failed");
+
     builder.init();
 
     if print_test_logging {
+        event!(Level::TRACE, "logger initialized - trace check");
+        event!(Level::DEBUG, "logger initialized - debug check");
+        event!(Level::INFO, "logger initialized - info check");
+        event!(Level::WARN, "logger initialized - warn check");
+        event!(Level::ERROR, "logger initialized - error check");
+
         trace!("logger initialized - trace check");
         debug!("logger initialized - debug check");
         info!("logger initialized - info check");
@@ -109,7 +124,7 @@ fn main() {
         start_daemon::SUBCOMMAND_NAME => start_daemon::main,
         _ => panic!("bad argument parse"),
     };
-    main_function(log_root, args.expect("subcommand args"));
+    main_function(args.expect("subcommand args"));
 }
 
 pub struct AppPreforkConfiguration {

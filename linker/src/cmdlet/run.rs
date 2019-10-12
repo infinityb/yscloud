@@ -5,8 +5,8 @@ use std::os::unix::io::AsRawFd;
 use std::path::Path;
 
 use clap::{App, Arg, SubCommand};
-use log::{info, trace, warn};
 use uuid::Uuid;
+use tracing::{span, Level, event};
 
 use sockets::socketpair_raw;
 use yscloud_config_model::{
@@ -46,16 +46,11 @@ fn is_url(maybe_url: &str) -> bool {
     maybe_url.starts_with("http://") || maybe_url.starts_with("https://")
 }
 
-pub fn main(logger: slog::Logger, matches: &clap::ArgMatches) {
+pub fn main(matches: &clap::ArgMatches) {
     let approot = matches.value_of("approot").unwrap();
     let approot = Path::new(approot).to_owned();
-    trace!("got approot: {}", approot.display());
-
     let artifacts = matches.value_of("artifacts").unwrap();
-    trace!("got artifacts: {:?}", artifacts);
-
     let manifest_path = matches.value_of("manifest").unwrap();
-    trace!("got manifest: {:?}", manifest_path);
 
     let mut overrides: HashMap<String, String> = HashMap::new();
     if let Some(override_args) = matches.values_of_lossy("artifact-override") {
@@ -66,8 +61,16 @@ pub fn main(logger: slog::Logger, matches: &clap::ArgMatches) {
             overrides.insert(package_name, artifact_path);
         }
 
-        warn!("development mode - using path overrides: {:?}", overrides);
+        event!(Level::WARN,"development mode - using path overrides: {:?}", overrides);
     }
+
+    event!(Level::INFO,
+        approot = ?approot,
+        artifacts = artifacts,
+        manifest_path = manifest_path,
+        overrides = ?overrides,
+        "starting",
+    );
 
     let rdr = File::open(&manifest_path).unwrap();
     let mut target_deployment_manifest =
@@ -89,13 +92,17 @@ fn reify_service_connections(
     artifact_path: &str,
     approot: &Path,
 ) -> Result<Vec<crate::ExecSomething>, Box<dyn StdError>> {
+    let span = span!(Level::INFO, "reify_service_connections",
+        artifact_path = artifact_path,
+        approot = &approot.display().to_string()[..]);
+
     let mut instances = HashMap::<Uuid, ExecSomething>::new();
     let mut instance_components = HashMap::<Uuid, &DeployedApplicationManifest>::new();
     let mut instance_by_package = HashMap::<&str, Uuid>::new();
 
     for component in &dm.components {
         let artifact = if let Some(path) = dm.path_overrides.get(&component.package_id) {
-            warn!(
+            event!(Level::WARN,
                 "because of override, trying to find package {:?} @ {}",
                 component.package_id, path
             );
@@ -114,6 +121,12 @@ fn reify_service_connections(
         builder.set_workdir(&workdir).unwrap();
 
         if let Sandbox::UnixUserConfinement(ref user, ref group) = component.sandbox {
+            event!(parent: &span, Level::INFO,
+                confinement.kind = "UNIX",
+                confinement.unix_user = &user[..],
+                confinement.unix_group = &group[..],
+                "setting up confinement: UNIX({}:{})", user, group
+            );
             builder.set_user(user).unwrap();
             builder.set_group(group).unwrap();
         }
@@ -135,6 +148,7 @@ fn reify_service_connections(
         instance_components.insert(instance_id, component);
         instance_by_package.insert(&component.package_id, instance_id);
     }
+    event!(parent: &span, Level::TRACE, instance_component_count = instance_components.len());
 
     for ps in &dm.public_services {
         let instance_id = instance_by_package
@@ -150,16 +164,17 @@ fn reify_service_connections(
             .get_mut(instance_id)
             .ok_or_else(|| format!("internal error: unknown instance {:?}", instance_id))?;
 
-        info!(
-            "binding public service {} to {:?}",
-            ps.service_id.service_name, ps.binder
+        event!(Level::TRACE,
+            service_name = &ps.service_id.service_name[..],
+            bind_target = ?ps.binder,
+            "binding public service",
         );
         let service_sock = bind_service(&ps.binder)?;
-        info!(
-            "binded public service {} to {:?} - fd = {}",
-            ps.service_id.service_name,
-            ps.binder,
-            service_sock.as_raw_fd(),
+        event!(Level::INFO,
+            service_name = &ps.service_id.service_name[..],
+            bind_target = ?ps.binder,
+            file_descriptor = service_sock.as_raw_fd(),
+            "binding public service complete",
         );
 
         instance.cfg.files.push(ServiceFileDescriptor {
