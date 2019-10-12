@@ -29,7 +29,7 @@ pub fn get_subcommand() -> App<'static, 'static> {
         .arg(common::artifact_override())
 }
 
-pub fn main(matches: &clap::ArgMatches) {
+pub fn main(logger: slog::Logger, matches: &clap::ArgMatches) {
     let approot = matches.value_of_os("approot").unwrap();
     let approot = Path::new(approot).to_owned();
     trace!("got approot: {}", approot.display());

@@ -33,7 +33,7 @@ pub fn get_subcommand() -> App<'static, 'static> {
         )
 }
 
-pub fn main(matches: &clap::ArgMatches) {
+pub fn main(logger: slog::Logger, matches: &clap::ArgMatches) {
     let deployment_name = matches.value_of("deployment-name").unwrap();
     trace!("got deployment name: {:?}", deployment_name);
 

@@ -4,6 +4,7 @@ use clap::{App, AppSettings, Arg};
 use env_logger::Builder;
 use log::{debug, error, info, trace, warn, LevelFilter};
 use uuid::Uuid;
+use slog::{Drain, slog_o, slog_info, slog_warn};
 
 use owned_fd::OwnedFd;
 use yscloud_config_model::{
@@ -29,6 +30,14 @@ const CARGO_PKG_VERSION: &str = env!("CARGO_PKG_VERSION");
 const CARGO_PKG_NAME: &str = env!("CARGO_PKG_NAME");
 
 fn main() {
+    let decorator = slog_term::TermDecorator::new().build();
+    let drain = slog_term::FullFormat::new(decorator).build().fuse();
+    let drain = slog_async::Async::new(drain).build().fuse();
+
+    let log_root = slog::Logger::root(drain, slog_o!());
+    slog_info!(log_root, "test info log"; "log-key" => true);
+    slog_warn!(log_root, "test info log"; "log-key" => true);
+
     use self::cmdlet::{create_release, publish_artifact, run, start_daemon};
     let matches = App::new(CARGO_PKG_NAME)
         .version(CARGO_PKG_VERSION)
@@ -100,7 +109,7 @@ fn main() {
         start_daemon::SUBCOMMAND_NAME => start_daemon::main,
         _ => panic!("bad argument parse"),
     };
-    main_function(args.expect("subcommand args"));
+    main_function(log_root, args.expect("subcommand args"));
 }
 
 pub struct AppPreforkConfiguration {

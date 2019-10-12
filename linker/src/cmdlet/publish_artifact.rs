@@ -58,7 +58,7 @@ pub fn get_subcommand() -> App<'static, 'static> {
         )
 }
 
-pub fn main(matches: &clap::ArgMatches) {
+pub fn main(logger: slog::Logger, matches: &clap::ArgMatches) {
     let registry = matches.value_of_os("registry").unwrap();
     let registry = Path::new(registry).to_owned();
     trace!("got registry: {}", registry.display());

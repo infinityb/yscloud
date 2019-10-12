@@ -46,7 +46,7 @@ fn is_url(maybe_url: &str) -> bool {
     maybe_url.starts_with("http://") || maybe_url.starts_with("https://")
 }
 
-pub fn main(matches: &clap::ArgMatches) {
+pub fn main(logger: slog::Logger, matches: &clap::ArgMatches) {
     let approot = matches.value_of("approot").unwrap();
     let approot = Path::new(approot).to_owned();
     trace!("got approot: {}", approot.display());
