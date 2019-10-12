@@ -1,5 +1,6 @@
 use std::io;
 use std::str::FromStr;
+use std::sync::Arc;
 
 use bytes::BytesMut;
 use failure::{Error, Fail};
@@ -7,7 +8,7 @@ use ksuid::Ksuid;
 use tokio::codec::{Decoder, Encoder};
 use tokio::codec::{FramedRead, FramedWrite};
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::sync::Lock;
+use tokio::sync::Mutex;
 use log::{warn, info};
 
 use crate::resolver::BackendManager;
@@ -346,14 +347,14 @@ impl Decoder for AsciiManagerServer {
 }
 
 pub async fn start_management_client<ClientRead, ClientWrite>(
-    mut sessman: Lock<SessionManager>,
-    mut backends: Lock<BackendManager>,
+    sessman: Arc<Mutex<SessionManager>>,
+    backends: Arc<Mutex<BackendManager>>,
     socket_reader: ClientRead,
     socket_writer: ClientWrite,
 ) -> Result<(), Error>
 where
-    ClientRead: AsyncRead + Unpin + 'static,
-    ClientWrite: AsyncWrite + Unpin + 'static,
+    ClientRead: AsyncRead + Unpin,
+    ClientWrite: AsyncWrite + Unpin,
 {
     use futures::sink::SinkExt;
     use futures::stream::StreamExt;
@@ -391,7 +392,7 @@ where
             break;
         }
 
-        let response = handle_query(&mut sessman, &mut backends, item).await?;
+        let response = handle_query(&sessman, &backends, item).await?;
         if let Err(sink_err) = sink.send(response).await {
             warn!("failed to push to sink: {}", sink_err);
         }
@@ -407,8 +408,8 @@ where
 }
 
 async fn handle_query(
-    sessman: &mut Lock<SessionManager>,
-    backend_man: &mut Lock<BackendManager>,
+    sessman: &Arc<Mutex<SessionManager>>,
+    backend_man: &Arc<Mutex<BackendManager>>,
     req: AsciiManagerRequest,
 ) -> Result<AsciiManagerResponse, Error> {
     match req {

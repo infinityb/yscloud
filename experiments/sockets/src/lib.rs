@@ -1,34 +1,9 @@
-use std::fs::File;
 use std::io;
-use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd, RawFd};
+use std::os::unix::io::{FromRawFd, RawFd};
 
 use nix::sys::socket::{socketpair, AddressFamily, SockFlag, SockType};
 
-pub struct OwnedFd(RawFd);
-
-impl FromRawFd for OwnedFd {
-    unsafe fn from_raw_fd(raw: RawFd) -> OwnedFd {
-        OwnedFd(raw)
-    }
-}
-
-impl AsRawFd for OwnedFd {
-    fn as_raw_fd(&self) -> RawFd {
-        self.0
-    }
-}
-
-impl Drop for OwnedFd {
-    fn drop(&mut self) {
-        let _ = nix::unistd::close(self.0);
-    }
-}
-
-impl From<File> for OwnedFd {
-    fn from(fd: File) -> OwnedFd {
-        OwnedFd(fd.into_raw_fd())
-    }
-}
+use owned_fd::OwnedFd;
 
 pub struct Connected {
     inner: OwnedFd,
@@ -37,7 +12,7 @@ pub struct Connected {
 impl Connected {
     pub unsafe fn from_raw_fd(raw: RawFd) -> Self {
         Connected {
-            inner: OwnedFd(raw),
+            inner: OwnedFd::from_raw_fd(raw),
         }
     }
 }
@@ -63,8 +38,9 @@ impl TcpListener {
     }
 
     pub unsafe fn from_raw_fd(raw: RawFd) -> Self {
+        let owned_fd = OwnedFd::from_raw_fd(raw);
         TcpListener {
-            inner: ListenerInner::AcceptingFd(OwnedFd(raw)),
+            inner: ListenerInner::AcceptingFd(owned_fd),
         }
     }
 }
@@ -180,5 +156,10 @@ pub fn socketpair_raw() -> io::Result<(OwnedFd, OwnedFd)> {
     )
     .map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
 
-    Ok((OwnedFd(left), OwnedFd(right)))
+    unsafe { 
+        Ok((
+            OwnedFd::from_raw_fd(left),
+            OwnedFd::from_raw_fd(right),
+        ))
+    }
 }

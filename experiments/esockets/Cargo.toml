@@ -1,0 +1,17 @@
+[package]
+name = "esockets"
+version = "0.1.0"
+authors = ["Stacey Ell <stacey.ell@gmail.com>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+futures-core-preview = "=0.3.0-alpha.19"
+futures-preview = "=0.3.0-alpha.19"
+mio = "0.6.19"
+socket2 = "0.3.11"
+tokio = "=0.2.0-alpha.6"
+tokio-net = "=0.2.0-alpha.6"
+tokio-io = "=0.2.0-alpha.6"
+bytes = "0.4.12"

@@ -1,5 +1,5 @@
 use std::fmt::{self, Write as _Write};
-
+use std::sync::Arc;
 use std::io;
 use std::net::{SocketAddr, SocketAddrV4, SocketAddrV6};
 use std::time::{Duration, Instant};
@@ -17,7 +17,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::tcp::TcpStream;
 use tokio::net::unix::UnixStream;
-use tokio::sync::Lock;
+use tokio::sync::Mutex;
 use tokio::codec::{FramedRead, FramedWrite};
 
 use tls::{
@@ -306,7 +306,7 @@ struct ClientHandle {
 }
 
 async fn register_sessman(
-    sessman: &mut Lock<SessionManager>,
+    sessman: &Arc<Mutex<SessionManager>>,
     client_addr: &SocketAddrPair,
 ) -> ClientHandle {
     let start_time = Instant::now();
@@ -332,24 +332,24 @@ async fn register_sessman(
 
 
 pub async fn start_client<ClientRead, ClientWrite>(
-    mut sessman: Lock<SessionManager>,
-    mut backend_man: Lock<BackendManager>,
+    sessman: Arc<Mutex<SessionManager>>,
+    backend_man: Arc<Mutex<BackendManager>>,
     client_addr: SocketAddrPair,
     client_reader: ClientRead,
     client_writer: ClientWrite,
 ) where
-    ClientRead: AsyncRead + Unpin + 'static,
-    ClientWrite: AsyncWrite + Unpin + 'static,
+    ClientRead: AsyncRead + Unpin,
+    ClientWrite: AsyncWrite + Unpin,
 {
     let backend_man: BackendManager = {
         let backend_man = backend_man.lock().await;
         BackendManager::clone(&*backend_man)
     };
 
-    let handle = register_sessman(&mut sessman, &client_addr).await;
+    let handle = register_sessman(&sessman, &client_addr).await;
     let session_id = handle.session_id;
 
-    match start_client_helper(handle, sessman.clone(), backend_man, client_addr, client_reader, client_writer).await {
+    match start_client_helper(handle, Arc::clone(&sessman), backend_man, client_addr, client_reader, client_writer).await {
         Ok(()) => info!("{} terminated OK", session_id.fmt_base62()),
         Err(()) => info!("{} terminated with error status", session_id.fmt_base62()),
     }
@@ -362,15 +362,15 @@ pub async fn start_client<ClientRead, ClientWrite>(
 
 async fn start_client_helper<ClientRead, ClientWrite>(
     handle: ClientHandle,
-    mut sessman: Lock<SessionManager>,
+    sessman: Arc<Mutex<SessionManager>>,
     backend_man: BackendManager,
     client_addr: SocketAddrPair,
     client_reader: ClientRead,
     client_writer: ClientWrite,
 ) -> Result<(), ()>
 where
-    ClientRead: AsyncRead + Unpin + 'static,
-    ClientWrite: AsyncWrite + Unpin + 'static,
+    ClientRead: AsyncRead + Unpin,
+    ClientWrite: AsyncWrite + Unpin,
 {
     info!(
         "{}: started connection from {}",
@@ -573,11 +573,11 @@ where
     let (backend_sink, backend_stream) = SniPassCodec.framed(backend_sock).split();
     let backend_stream = handle.aborter.with_try_stream(backend_stream);
 
-    let mut s2c_sessman = sessman.clone();
+    let s2c_sessman = sessman.clone();
     let server_to_client = async {
         let res = unidirectional_copy(
             &handle,
-            &mut s2c_sessman,
+            &s2c_sessman,
             client_sink,
             backend_stream,
             Direction::BackendToClient,
@@ -600,11 +600,11 @@ where
         );
     };
 
-    let mut c2s_sessman = sessman.clone();
+    let c2s_sessman = sessman.clone();
     let client_to_server = async {
         let res = unidirectional_copy(
             &handle,
-            &mut c2s_sessman,
+            &c2s_sessman,
             backend_sink,
             client_stream,
             Direction::ClientToBackend,
@@ -635,7 +635,7 @@ where
 #[allow(clippy::needless_lifetimes)]
 async fn unidirectional_copy<Si, St>(
     handle: &ClientHandle,
-    sessman: &mut Lock<SessionManager>,
+    sessman: &Arc<Mutex<SessionManager>>,
     mut sink: Si,
     mut stream: AbortableTryStream<St, SniDetectRecord, io::Error>,
     direction: Direction,

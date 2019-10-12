@@ -1,4 +1,3 @@
-#![feature(async_await)]
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::net::TcpListener as StdTcpListener;
@@ -14,7 +13,7 @@ use log::LevelFilter;
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
 use tokio::net::UnixListener;
-use tokio::sync::Lock;
+use tokio::sync::Mutex;
 use tokio_net::driver::Handle;
 use yscloud_config_model::AppConfiguration;
 
@@ -28,7 +27,7 @@ mod sni;
 mod state_track;
 
 use self::config::ResolverInit;
-use self::mgmt_proto::{start_management_client, AsciiManagerServer};
+use self::mgmt_proto::{start_management_client};
 use self::resolver::{NetworkLocation, BackendManager, BackendSet};
 use self::sni::{start_client, SocketAddrPair};
 use self::state_track::SessionManager;
@@ -163,12 +162,12 @@ fn main() {
         );
     }
 
-    let resolver = Lock::new(BackendManager { backends: Arc::new(backends) });
-    let mgmt_resolver = Lock::clone(&resolver);
+    let resolver = Arc::new(Mutex::new(BackendManager { backends: Arc::new(backends) }));
+    let mgmt_resolver = Arc::clone(&resolver);
     let data_resolver = resolver;
 
-    let sessman = Lock::new(SessionManager::new());
-    let mgmt_sessman = Lock::clone(&sessman);
+    let sessman = Arc::new(Mutex::new(SessionManager::new()));
+    let mgmt_sessman = Arc::clone(&sessman);
     let data_sessman = sessman;
 
     let mgmt_server = async {
@@ -185,10 +184,10 @@ fn main() {
                 None => break,
             };
 
-            let socket = socket.expect("FIXME");
+            let mut socket = socket.expect("FIXME");
 
-            let (socket_reader, socket_writer) = socket.split();
-            tokio::spawn(async {
+            tokio::spawn(async move {
+                let (socket_reader, socket_writer) = socket.split();
                 if let Err(err) = start_management_client(sessman, resolver, socket_reader, socket_writer).await {
                     warn!("management client terminated: {}", err);
                 }
@@ -208,7 +207,7 @@ fn main() {
                 None => break,
             };
 
-            let socket = socket.expect("FIXME");
+            let mut socket = socket.expect("FIXME");
 
             let laddr = match socket.local_addr() {
                 Ok(laddr) => laddr,
@@ -232,14 +231,18 @@ fn main() {
                 }
             };
 
-            let (client_reader, client_writer) = socket.split();
-            tokio::spawn(start_client(
-                data_sessman.clone(),
-                data_resolver.clone(),
-                client_conn,
-                client_reader,
-                client_writer,
-            ));
+            let data_sessman = Arc::clone(&data_sessman);
+            let data_resolver = Arc::clone(&data_resolver);
+            tokio::spawn(async move {
+                let (client_reader, client_writer) = socket.split();
+                start_client(
+                    data_sessman,
+                    data_resolver,
+                    client_conn,
+                    client_reader,
+                    client_writer,
+                ).await;
+            });
         }
     };
 
