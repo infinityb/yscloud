@@ -1619,11 +1619,20 @@ dependencies = [
  "rand 0.7.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "serde 1.0.101 (registry+https://github.com/rust-lang/crates.io-index)",
  "serde_json 1.0.41 (registry+https://github.com/rust-lang/crates.io-index)",
+ "smallvec 0.6.10 (registry+https://github.com/rust-lang/crates.io-index)",
+ "socket-traits 0.1.0",
  "tls 0.1.0",
  "tokio 0.2.0-alpha.6 (registry+https://github.com/rust-lang/crates.io-index)",
  "tokio-net 0.2.0-alpha.6 (registry+https://github.com/rust-lang/crates.io-index)",
  "uuid 0.6.5 (registry+https://github.com/rust-lang/crates.io-index)",
  "yscloud-config-model 0.1.0",
+]
+
+[[package]]
+name = "socket-traits"
+version = "0.1.0"
+dependencies = [
+ "tokio 0.2.0-alpha.6 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
 [[package]]

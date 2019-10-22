@@ -33,8 +33,7 @@ const CARGO_PKG_VERSION: &str = env!("CARGO_PKG_VERSION");
 const CARGO_PKG_NAME: &str = env!("CARGO_PKG_NAME");
 
 fn main() {
-    let mut my_subscriber_builder = FmtSubscriber::builder()
-        .with_ansi(true);
+    let mut my_subscriber_builder = FmtSubscriber::builder();
 
     use self::cmdlet::{create_release, publish_artifact, run, start_daemon};
     let matches = App::new(CARGO_PKG_NAME)
@@ -109,6 +108,7 @@ fn main() {
         event!(Level::WARN, "logger initialized - warn check");
         event!(Level::ERROR, "logger initialized - error check");
 
+        // deprecated logging
         trace!("logger initialized - trace check");
         debug!("logger initialized - debug check");
         info!("logger initialized - info check");

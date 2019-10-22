@@ -7,6 +7,7 @@ members = [
 	"experiments/linkerclient",
 	"experiments/sni-multiplexor",
 	"experiments/sockets",
+	"experiments/socket-traits",
 	"infra/cloudsafe",
 	"infra/memfd",
 	"infra/owned_fd",

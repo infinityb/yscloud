@@ -24,6 +24,7 @@ mod erased;
 mod mgmt_proto;
 mod resolver;
 mod sni;
+// mod sni2;
 mod state_track;
 
 use self::config::ResolverInit;

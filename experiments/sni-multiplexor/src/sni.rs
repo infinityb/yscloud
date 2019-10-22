@@ -20,10 +20,8 @@ use tokio::net::unix::UnixStream;
 use tokio::sync::Mutex;
 use tokio::codec::{FramedRead, FramedWrite};
 
-use tls::{
-    extract_record, ByteIterRead, ClientHello, Extension, ExtensionServerName, Handshake,
-    RECORD_CONTENT_TYPE_HANDSHAKE,
-};
+
+use tls::{ClientHello, Extension, ExtensionServerName, decode_client_hello};
 
 use crate::abortable_stream::{
     abortable_stream_pair, AbortTryStreamError, AbortableStreamFactory, AbortableTryStream,
@@ -31,6 +29,7 @@ use crate::abortable_stream::{
 use crate::erased::NetworkStream;
 use crate::resolver::{BackendManager, NetworkLocationAddress, Resolver2};
 use crate::state_track::{Session, SessionManager};
+
 
 const DEFAULT_SNI_DETECTOR_MAX_LEN: usize = 20480;
 
@@ -145,23 +144,6 @@ impl Decoder for SniDetectorCodec {
     type Error = io::Error;
 
     fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
-        use tls::{Error as TlsError, ErrorKind as TlsErrorKind};
-        fn fixup_err(tls: TlsError) -> io::Error {
-            match tls.kind() {
-                TlsErrorKind::ProtocolViolation => {
-                    io::Error::new(io::ErrorKind::Other, ALERT_INTERNAL_ERROR)
-                }
-                TlsErrorKind::Truncated => {
-                    warn!("I think this shouldn't happen: {}", tls);
-                    io::Error::new(io::ErrorKind::Other, ALERT_INTERNAL_ERROR)
-                }
-                TlsErrorKind::Other => {
-                    warn!("got Other error: {}", tls);
-                    io::Error::new(io::ErrorKind::Other, ALERT_INTERNAL_ERROR)
-                }
-            }
-        }
-
         if self.emitted_sni {
             if src.is_empty() {
                 return Ok(None);
@@ -176,54 +158,20 @@ impl Decoder for SniDetectorCodec {
         }
 
         let mut allocator = self.arena.allocator();
-        let mut dst_iter = src.iter();
-
-        let mut data_size = 0;
-
-        loop {
-            let record = match extract_record(&mut dst_iter) {
-                Ok(Some(rec)) => rec,
-                Ok(None) => break,
-                Err(err) => {
-                    return Err(fixup_err(err));
+        let client_hello = match decode_client_hello(&mut allocator, &src[..]) {
+            Ok(ch) => ch,
+            Err(err) => {
+                if err.is_truncated() {
+                    return Ok(None);
                 }
-            };
-            if record.content_type != RECORD_CONTENT_TYPE_HANDSHAKE {
-                continue;
+                return Err(io::Error::new(io::ErrorKind::Other, ALERT_INTERNAL_ERROR));
             }
-            data_size += record.data.len();
-        }
-
-        let unframed_data = allocator.alloc_slice_default(data_size);
-        let mut unframed_data_write = &mut unframed_data[..];
-
-        let mut dst_iter = src.iter();
-        while let Some(record) = extract_record(&mut dst_iter).unwrap() {
-            if record.content_type != RECORD_CONTENT_TYPE_HANDSHAKE {
-                continue;
-            }
-
-            let (to_write, rest) = unframed_data_write.split_at_mut(record.data.len());
-            to_write.copy_from_slice(record.data);
-            unframed_data_write = rest;
-        }
-        assert_eq!(unframed_data_write.len(), 0);
-
-        let server_names =
-            match Handshake::read_byte_iter(&mut allocator, &mut unframed_data.iter())
-                .map_err(fixup_err)?
-            {
-                Handshake::ClientHello(hello) => get_server_names(hello)?,
-                Handshake::Unknown(..) => {
-                    return Err(io::Error::new(io::ErrorKind::Other, ALERT_INTERNAL_ERROR));
-                }
-            };
-
+        };
+        let server_names = get_server_names(&client_hello)?;
         if server_names.0.len() != 1 {
             return Err(io::Error::new(io::ErrorKind::Other, ALERT_INTERNAL_ERROR));
         }
         let server_name = server_names.0[0].0.to_string();
-        drop(allocator);
 
         debug!(
             "arena had capacity {} after SNI detection",
@@ -236,7 +184,7 @@ impl Decoder for SniDetectorCodec {
     }
 }
 
-fn get_server_names<'arena>(
+pub fn get_server_names<'arena>(
     hello: &ClientHello<'arena>,
 ) -> Result<&'arena ExtensionServerName<'arena>, io::Error> {
     for ext in hello.extensions.0 {
@@ -353,6 +301,7 @@ pub async fn start_client<ClientRead, ClientWrite>(
         Ok(()) => info!("{} terminated OK", session_id.fmt_base62()),
         Err(()) => info!("{} terminated with error status", session_id.fmt_base62()),
     }
+
     {
         let mut sessman = sessman.lock().await;
         sessman.mark_shutdown(&session_id);
@@ -706,6 +655,7 @@ where
 
     res
 }
+
 
 fn duration_milliseconds(dur: Duration) -> u64 {
     let mut out = 0;

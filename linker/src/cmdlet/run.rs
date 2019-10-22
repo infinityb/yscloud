@@ -37,7 +37,7 @@ pub fn get_subcommand() -> App<'static, 'static> {
                 .required(true)
                 .takes_value(true),
         )
-        .arg(common::registry())
+        // .arg(common::registry())
         .arg(common::artifacts())
         .arg(common::artifact_override())
 }

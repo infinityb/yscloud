@@ -15,14 +15,18 @@ pub enum ErrorKind {
 #[derive(Clone, Debug)]
 pub struct Error {
     kind: ErrorKind,
-    message: String,
 }
 
 impl error::Error for Error {}
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{:?}: {}", self.kind, self.message)
+        let msg = match self.kind {
+            ErrorKind::Truncated => "message truncated",
+            ErrorKind::ProtocolViolation => "protocol violation",
+            ErrorKind::Other => "other",
+        };
+        write!(f, "{:?}: {}", self.kind, msg)
     }
 }
 
@@ -34,14 +38,19 @@ impl Error {
     pub fn truncated() -> Error {
         Error {
             kind: ErrorKind::Truncated,
-            message: "message truncated".into(),
+        }
+    }
+
+    pub fn is_truncated(&self) -> bool {
+        match self.kind {
+            ErrorKind::Truncated => true,
+            _ => false,
         }
     }
 
     pub fn protocol_violation() -> Error {
         Error {
             kind: ErrorKind::ProtocolViolation,
-            message: "protocol violation".into(),
         }
     }
 }
@@ -420,6 +429,39 @@ pub fn extract_record<'de>(data: &mut slice::Iter<'de, u8>) -> Result<Option<Rec
         content_type: record.content_type,
         data,
     }))
+}
+
+pub fn decode_client_hello<'arena>(mut allocator: &mut Allocator<'arena>, data: &[u8])
+    -> Result<ClientHello<'arena>, Error>
+{
+    let mut data_size = 0;
+    let mut data_iter = data.iter();
+    while let Some(record) = extract_record(&mut data_iter)? {
+        if record.content_type != RECORD_CONTENT_TYPE_HANDSHAKE {
+            continue;
+        }
+        data_size += record.data.len();
+    }
+
+    let unframed_data = allocator.alloc_slice_default(data_size);
+    let mut unframed_data_write = &mut unframed_data[..];
+
+    let mut data_iter = data.iter();
+    while let Some(record) = extract_record(&mut data_iter).unwrap() {
+        if record.content_type != RECORD_CONTENT_TYPE_HANDSHAKE {
+            continue;
+        }
+
+        let (to_write, rest) = unframed_data_write.split_at_mut(record.data.len());
+        to_write.copy_from_slice(record.data);
+        unframed_data_write = rest;
+    }
+    assert_eq!(unframed_data_write.len(), 0);
+    
+    match Handshake::read_byte_iter(&mut allocator, &mut unframed_data.iter())? {
+        Handshake::ClientHello(hello) => Ok(*hello),
+        Handshake::Unknown(..) => Err(Error { kind: ErrorKind::Other }),
+    }
 }
 
 const TLS_EXTENSION_SERVER_NAME: u16 = 0x0000;

@@ -4,6 +4,7 @@ use std::fs::File;
 use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
+use std::error::Error as StdError;
 
 use digest::FixedOutput;
 use nix::unistd::{execve, fork, lseek, unlink, write, ForkResult, Pid, Whence};
@@ -64,7 +65,7 @@ impl ExecutableFactory {
 
     pub fn finalize(self) -> Executable {
         Executable {
-            path: self.fully_qualified_path,
+            path: self.fully_qualified_path.canonicalize().unwrap(),
             temporary_dir: Some(self.temporary_dir),
         }
     }
@@ -101,7 +102,7 @@ impl Executable {
         let path: &Path = path.as_ref();
         if path.exists() {
             Ok(Executable {
-                path: path.into(),
+                path: path.canonicalize().unwrap(),
                 temporary_dir: None,
             })
         } else {
@@ -146,7 +147,7 @@ fn execute_child(e: &ExecConfig) -> io::Result<Void> {
 }
 
 pub struct ExecExtras {
-    _fields: (),
+    workdir: PathBuf,
 }
 
 impl ExecExtras {
@@ -157,7 +158,7 @@ impl ExecExtras {
 
 #[derive(Default)]
 pub struct ExecExtrasBuilder {
-    _fields: (),
+    workdir: Option<PathBuf>,
 }
 
 impl ExecExtrasBuilder {
@@ -169,12 +170,15 @@ impl ExecExtrasBuilder {
         Ok(())
     }
 
-    pub fn set_workdir(&mut self, _: &Path) -> io::Result<()> {
+    pub fn set_workdir(&mut self, workdir: &Path) -> io::Result<()> {
+        self.workdir = Some(workdir.to_owned());
         Ok(())
     }
 
     pub fn build(&self) -> ExecExtras {
-        ExecExtras { _fields: () }
+        ExecExtras {
+            workdir: self.workdir.as_ref().unwrap().clone(),
+        }
     }
 }
 
@@ -182,7 +186,7 @@ impl ExecExtrasBuilder {
 // let path_bytes = OsStrExt::as_bytes(artifact_path.as_os_str());
 // let artifact_path = CString::new(path_bytes).expect("valid c-string");
 
-fn exec_artifact_child(_e: &ExecExtras, c: AppPreforkConfiguration) -> io::Result<Void> {
+fn exec_artifact_child(e: &ExecExtras, c: AppPreforkConfiguration) -> io::Result<Void> {
     use nix::fcntl::open;
     use nix::fcntl::OFlag;
     use nix::sys::stat::Mode;
@@ -220,7 +224,9 @@ fn exec_artifact_child(_e: &ExecExtras, c: AppPreforkConfiguration) -> io::Resul
         CString::new(format!("{}", tmpfile)).unwrap(),
     ];
 
-    event!(Level::INFO, "running {} {:?} -- {}", package_id, arguments, data,);
+    event!(Level::INFO, "running {} {:?} in {} -- {}", package_id, arguments, e.workdir.display(), data);
+    nix::unistd::chdir(&e.workdir).map_err(io_other)?;
+
     execute_child(&ExecConfig {
         executable: c.artifact,
         arguments,
@@ -243,3 +249,11 @@ pub fn exec_artifact(e: &ExecExtras, c: AppPreforkConfiguration) -> io::Result<P
         Err(err) => Err(io::Error::new(io::ErrorKind::Other, err)),
     }
 }
+
+fn io_other<E>(e: E) -> io::Error
+where
+    E: Into<Box<dyn StdError + Send + Sync>>,
+{
+    io::Error::new(io::ErrorKind::Other, e)
+}
+
