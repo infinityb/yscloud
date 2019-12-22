@@ -28,7 +28,6 @@ pub const SYSTEM_LINUX_DEV_READ: Permission = p("org.yshi.permissions.linux.dev.
 pub const SYSTEM_LINUX_PROC_READ: Permission = p("org.yshi.permissions.linux.proc.readonly");
 
 /// UNCONSTRAINED disables all sandboxing.  Currently, this is required.
-#[deprecated]
 pub const UNCONSTRAINED: Permission = p("org.yshi.permissions.unconstrained");
 
 #[deprecated]

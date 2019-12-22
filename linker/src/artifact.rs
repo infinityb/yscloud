@@ -11,10 +11,19 @@ pub fn find_artifact(base: &str, package_id: &str, version: &Version) -> io::Res
 }
 
 pub fn direct_load_artifact(path: &str) -> io::Result<Executable> {
+    let logging_span_def = span!(Level::DEBUG, "direct_load_artifact", path = ?path);
+
     let pb: PathBuf = Path::new(path).into();
+
     if let Ok(aref) = Executable::open(pb) {
+        event!(Level::DEBUG, found_artifact=true);
         return Ok(aref);
     }
+
+    event!(Level::ERROR, "failed to find artifact");
+
+    drop(logging_span_def);
+
     Err(io::Error::new(io::ErrorKind::Other, "no binary found"))
 }
 
@@ -40,6 +49,8 @@ impl<'a> DiskArtifactLoader<'a> {
             event!(Level::DEBUG, search_path = ?pb.display());
 
             if let Ok(aref) = Executable::open(pb) {
+                event!(Level::DEBUG, found_artifact=true);
+
                 return Ok(aref);
             }
         }

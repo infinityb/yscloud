@@ -5,12 +5,13 @@ use std::os::unix::io::AsRawFd;
 
 use bytes::buf::{Buf, BufMut};
 use futures_core::ready;
+use futures::io::AsyncReadExt;
 use mio::event::Evented;
 use mio::unix::EventedFd;
 use mio::{IoVec, Token, PollOpt, Poll as MioPoll, Ready as MioReady};
 use socket2::Socket;
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio_io::{AsyncWriteExt, AsyncReadExt};
+use tokio::io::{AsyncWriteExt, AsyncReadExt};
 use tokio_net::util::PollEvented;
 
 struct StreamSocketInner(Socket);
@@ -217,7 +218,7 @@ impl AsyncWrite for StreamSocket {
     }
 
     fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
-        self.shutdown(std::net::Shutdown::Write)?;
+        self.shutdown(std::net::Shutdown::Write);
         Poll::Ready(Ok(()))
     }
 

@@ -8,36 +8,44 @@ use uuid::Uuid;
 
 pub mod permissions;
 
-#[derive(Serialize, Deserialize, Clone, Copy, Debug)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum SocketFlag {
     BehindHaproxy,
+    StartListen,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub struct DeploymentManifest {
+    pub tenant_id: String,
     pub deployment_name: String,
     pub public_services: Vec<DeployedPublicService>,
     pub components: Vec<DeployedApplicationManifest>,
+    
+    // internal use only.
     #[serde(default = "Default::default")]
     pub path_overrides: HashMap<String, String>,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub struct DeployedApplicationManifest {
     pub package_id: String,
     pub version: Version,
     pub provided_local_services: Vec<String>,
     pub provided_remote_services: Vec<String>,
-    pub required_remote_services: Vec<String>,
     pub required_local_services: Vec<ServiceId>,
+    pub required_remote_services: Vec<String>,
     pub sandbox: Sandbox,
-    pub extras: serde_json::Map<String, serde_json::Value>,
+    pub extras: serde_json::Value,
+
+    // platform triple -> ArtifactHashSet
+    #[serde(default = "Default::default")]
+    pub artifacts: BTreeMap<String, ArtifactHashSet>,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum Sandbox {
     Unconfined,
@@ -45,7 +53,7 @@ pub enum Sandbox {
     PermissionSet(Vec<Permission>),
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub struct DeployedPublicService {
     pub service_id: ServiceId,
@@ -59,14 +67,14 @@ pub struct ServiceId {
     pub service_name: String,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub struct PublicService {
     pub service_name: String,
     pub binder: PublicServiceBinder,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum PublicServiceBinder {
     UnixDomainBinder(UnixDomainBinder),
@@ -76,7 +84,7 @@ pub enum PublicServiceBinder {
     // SniServiceBinder(SniServiceBinder),
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub struct UnixDomainBinder {
     pub path: PathBuf,
@@ -86,7 +94,7 @@ pub struct UnixDomainBinder {
     pub flags: Vec<SocketFlag>,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub struct NativePortBinder {
     pub bind_address: String,
@@ -108,7 +116,7 @@ fn start_listen_default() -> bool {
     true
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub struct WebServiceBinder {
     pub hostname: String,
@@ -130,11 +138,13 @@ pub struct ServiceConnection {
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(rename_all = "snake_case")]
 pub struct AppConfiguration {
+    pub tenant_id: String,
+    pub deployment_name: String,
     pub package_id: String,
     pub instance_id: Uuid,
     pub version: String,
     pub files: Vec<FileDescriptorInfo>,
-    pub extras: serde_json::Map<String, serde_json::Value>,
+    pub extras: serde_json::Value,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -192,29 +202,36 @@ struct ApplicationDependency {
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "snake_case")]
-struct ApplicationBinary {
-    pub binary_sha: String,
-    pub release_filename: String,
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug)]
-#[serde(rename_all = "snake_case")]
-struct ApplicationRegistryEntry {
-    pub package_id: String,
-    pub version: Version,
-    pub binaries: HashMap<String, ApplicationBinary>,
-    pub manifest_filename: String,
-    pub manifest_sha: String,
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug)]
-#[serde(rename_all = "snake_case")]
-pub struct ApplicationDeployment {
+pub struct ApplicationDeploymentTemplate {
+    pub tenant_id: String,
     pub deployment_name: String,
     pub public_services: Vec<PublicService>,
-    pub service_implementations: BTreeMap<String, String>,
+    pub service_implementations: BTreeMap<String, ApplicationDeploymentRequirement>,
     pub configuration: BTreeMap<String, serde_json::Value>,
     pub sandbox: BTreeMap<String, Sandbox>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "snake_case")]
+pub struct RegistryEntry {
+    pub version: Version,
+    // platform triple -> hex of hash
+    pub sha256s: HashMap<String, String>,
+    pub manifest: ApplicationManifest,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "snake_case")]
+pub struct ArtifactInfo {
+    pub package_id: String,
+    pub version: Version,
+    pub sha256s: HashMap<String, String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct ApplicationDeploymentRequirement {
+    pub package_id: String,
+    pub version_req: VersionReq,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -233,4 +250,13 @@ pub enum ServiceFileDirection {
     ServingListening,
     ServingConnected,
     Consuming,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub struct ArtifactHashSet {
+    // make mandatory later
+    pub content_length: Option<u64>,
+    // make optional later.
+    pub sha256: String,
 }

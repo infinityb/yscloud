@@ -37,7 +37,6 @@ pub fn get_subcommand() -> App<'static, 'static> {
                 .required(true)
                 .takes_value(true),
         )
-        // .arg(common::registry())
         .arg(common::artifacts())
         .arg(common::artifact_override())
 }
@@ -98,7 +97,7 @@ fn reify_service_connections(
 
     let mut instances = HashMap::<Uuid, ExecSomething>::new();
     let mut instance_components = HashMap::<Uuid, &DeployedApplicationManifest>::new();
-    let mut instance_by_package = HashMap::<&str, Uuid>::new();
+    let mut instance_by_package = HashMap::<&str, Uuid>::new();        
 
     for component in &dm.components {
         let artifact = if let Some(path) = dm.path_overrides.get(&component.package_id) {
@@ -136,6 +135,8 @@ fn reify_service_connections(
             ExecSomething {
                 extras: builder.build(),
                 cfg: AppPreforkConfiguration {
+                    tenant_id: dm.tenant_id.clone(),
+                    deployment_name: dm.deployment_name.clone(),
                     package_id: component.package_id.clone(),
                     artifact,
                     version: format!("{}", component.version),

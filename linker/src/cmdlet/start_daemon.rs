@@ -15,7 +15,6 @@ pub fn get_subcommand() -> App<'static, 'static> {
         .version(CARGO_PKG_VERSION)
         .about("unimplemented")
         .arg(common::approot())
-        .arg(common::registry())
         .arg(common::artifacts())
         .arg(
             Arg::with_name("control-socket")
@@ -37,10 +36,6 @@ pub fn main(matches: &clap::ArgMatches) {
     let artifacts = matches.value_of("artifacts").unwrap().to_string();
     trace!("got artifacts: {:?}", artifacts);
 
-    let registry = matches.value_of_os("registry").unwrap();
-    let registry = Path::new(registry).to_owned();
-    trace!("got registry: {:?}", registry.display());
-
     let control_socket = matches.value_of_os("control-socket").unwrap();
     let control_socket = Path::new(control_socket).to_owned();
     trace!("got control-socket: {:?}", control_socket.display());
@@ -60,7 +55,6 @@ pub fn main(matches: &clap::ArgMatches) {
     start(Config {
         approot,
         artifacts,
-        registry,
         control_socket,
         overrides,
     });

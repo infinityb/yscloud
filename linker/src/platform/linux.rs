@@ -9,9 +9,9 @@ use std::sync::Arc;
 
 use digest::FixedOutput;
 use log::{debug, info, warn};
-use nix::fcntl::{open, OFlag};
+use nix::fcntl::{open, OFlag, fcntl};
 use nix::sys::stat::Mode;
-use nix::unistd::{fexecve, fork, lseek64, write, ForkResult, Gid, Pid, Uid, Whence};
+use nix::unistd::{execveat, fork, lseek64, write, ForkResult, Gid, Pid, Uid, Whence};
 use sha2::Sha256;
 use users::{get_group_by_name, get_user_by_name};
 
@@ -123,10 +123,16 @@ impl Executable {
     }
 
     pub fn execute(&self, arguments: &[CString], env: &[CString]) -> io::Result<Void> {
-        fexecve(self.0.as_raw_fd(), arguments, env)
+        use nix::fcntl::{fcntl, FcntlArg, FdFlag, AtFlags};
+
+        fcntl(self.0.as_raw_fd(), FcntlArg::F_SETFD(FdFlag::FD_CLOEXEC))
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
 
-        // successful invokations of fexecve don't return.
+        let program_name = CString::new("").unwrap();
+        execveat(self.0.as_raw_fd(), &program_name, arguments, env, AtFlags::AT_EMPTY_PATH)
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+
+        // successful invokations of execveat don't return.
         unreachable!();
     }
 }

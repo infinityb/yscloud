@@ -32,7 +32,7 @@ pub struct ExecutableFactory {
 }
 
 impl ExecutableFactory {
-    pub fn new(name: &str, capacity: i64) -> io::Result<ExecutableFactory> {
+    pub fn new(name: &str, _capacity: i64) -> io::Result<ExecutableFactory> {
         let temporary_dir = tempdir()?;
         let fully_qualified_path = temporary_dir.path().join(name);
         let backing_storage = File::create(&fully_qualified_path)?;
@@ -224,7 +224,7 @@ fn exec_artifact_child(e: &ExecExtras, c: AppPreforkConfiguration) -> io::Result
         CString::new(format!("{}", tmpfile)).unwrap(),
     ];
 
-    event!(Level::INFO, "running {} {:?} in {} -- {}", package_id, arguments, e.workdir.display(), data);
+    event!(Level::TRACE, "running {} {:?} in {} -- {}", package_id, arguments, e.workdir.display(), data);
     nix::unistd::chdir(&e.workdir).map_err(io_other)?;
 
     execute_child(&ExecConfig {

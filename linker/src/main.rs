@@ -128,12 +128,14 @@ fn main() {
 }
 
 pub struct AppPreforkConfiguration {
+    tenant_id: String,
+    deployment_name: String,
     package_id: String,
     artifact: Executable,
     instance_id: Uuid,
     version: String,
     files: Vec<ServiceFileDescriptor>,
-    extras: serde_json::Map<String, serde_json::Value>,
+    extras: serde_json::Value,
 }
 
 pub struct ServiceFileDescriptor {

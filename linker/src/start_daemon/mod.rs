@@ -1,5 +1,4 @@
-use failure::Fallible;
-use semver::Version;
+
 use std::collections::HashMap;
 use std::convert::TryInto;
 use std::error::Error as StdError;
@@ -9,8 +8,9 @@ use std::os::unix::io::AsRawFd;
 use std::path::Path;
 use std::path::PathBuf;
 use std::pin::Pin;
-use std::sync::Arc;
 
+use failure::Fallible;
+use semver::Version;
 use futures::future::{Future, FutureExt};
 use log::{error, info, warn};
 use sockets::socketpair_raw;
@@ -21,7 +21,6 @@ use yscloud_config_model::{
 };
 
 use crate::platform::{Executable, ExecutableFactory};
-use crate::registry::{FileRegistry, RegistryEntry};
 use crate::{
     artifact::direct_load_artifact, bind_service, AppPreforkConfiguration, ExecExtras,
     ExecSomething, ServiceFileDescriptor,
@@ -30,15 +29,13 @@ use crate::{
 const DEFAULT_MAX_ARTIFACT_SIZE: u64 = 50 * 1 << 20; // 50 MB
 
 pub fn start(cfg: Config) {
-    let registry = FileRegistry::new(&cfg.registry);
-
     let rdr = File::open("example-deployment-manifest.json").unwrap();
     let mut target_deployment_manifest =
         serde_json::from_reader::<_, DeploymentManifest>(rdr).unwrap();
 
     target_deployment_manifest.path_overrides = cfg.overrides.clone();
 
-    let fut = download_components(&cfg, &registry, &target_deployment_manifest);
+    let fut = download_components(&cfg, &target_deployment_manifest);
     let rt = tokio::runtime::Runtime::new().unwrap();
     let xx = rt.block_on(fut).unwrap();
     let reified = reify_service_connections(&target_deployment_manifest, xx, &cfg.approot).unwrap();
@@ -50,7 +47,6 @@ pub struct Config {
     pub approot: PathBuf,
     // this might be a remote resource or a local one - our type is incorrect here.
     pub artifacts: String,
-    pub registry: PathBuf,
     pub control_socket: PathBuf,
     pub overrides: HashMap<String, String>,
 }
@@ -66,56 +62,70 @@ struct PackageKey {
     version: Version,
 }
 
-async fn fetch_component_metadata(
-    reg: &FileRegistry,
-    dm: &DeploymentManifest,
-) -> Fallible<HashMap<PackageKey, RegistryEntry>> {
-    let dm: DeploymentManifest = dm.clone();
+// fn fetch_component_metadata<'a>(
+//     dm: &'a DeploymentManifest,
+// ) -> Fallible<HashMap<PackageKey<'a>, &'a DeployedApplicationManifest>> {
+//     let dm: DeploymentManifest = dm.clone();
 
-    let mut reg_futures: Vec<
-        Pin<Box<dyn Future<Output = Fallible<(PackageKey, RegistryEntry)>> + Send>>,
-    > = Vec::new();
-    for component in &dm.components {
-        if dm.path_overrides.get(&component.package_id).is_none() {
-            reg_futures.push(
-                async move {
-                    let entry = reg
-                        .load_version(&component.package_id, &component.version)
-                        .await?;
+//     let mut reg_futures: Vec<
+//         Pin<Box<dyn Future<Output = Fallible<(PackageKey, RegistryEntry)>> + Send>>,
+//     > = Vec::new();
 
-                    Ok((
-                        PackageKey {
-                            package_id: component.package_id.clone(),
-                            version: component.version.clone(),
-                        },
-                        entry,
-                    ))
-                }
-                    .boxed(),
-            );
-        }
-    }
 
-    let out: HashMap<_, _> = futures::future::try_join_all(reg_futures)
-        .await?
-        .into_iter()
-        .collect();
+//     for component in &dm.components {
+//         if dm.path_overrides.get(&component.package_id).is_none() {
 
-    Ok(out)
-}
+//             let component_version = component.version.clone();
+//             let component_package_id = component.package_id.clone();
+
+//             let triple_to_sha256 = HashMap::new();
+//             triple_to_sha256.insert((), ());
+
+//             RegistryEntry {
+//                 version: component.version.clone(),
+//                 sha256s: triple_to_sha256,
+//                 manifest: 
+//             }
+
+//             reg_futures.push(
+//                 async move {
+//                     let component_req = VersionReq::exact(&component_version);
+
+//                     RegistryEntry {
+//                         version: component_version.clone(),
+//                         sha256s: 
+//                     }
+//                     let entry = reg_clone
+//                         .find_best_entry_for_version(&component_package_id, &component_req)
+//                         .await?;
+
+//                     Ok((
+//                         PackageKey {
+//                             package_id: component_package_id,
+//                             version: component_version,
+//                         },
+//                         entry,
+//                     ))
+//                 }
+//                     .boxed(),
+//             );
+//         }
+//     }
+
+//     let out: HashMap<_, _> = futures::future::try_join_all(reg_futures)
+//         .await?
+//         .into_iter()
+//         .collect();
+
+//     Ok(out)
+// }
 
 async fn download_components(
     cfg: &Config,
-    reg: &FileRegistry,
     dm: &DeploymentManifest,
 ) -> Fallible<HashMap<PackageKey, Component>> {
     let dm: DeploymentManifest = dm.clone();
 
-    // registry lookups
-    let reg_entries = fetch_component_metadata(reg, &dm).await?;
-    let reg_entries = Arc::new(reg_entries);
-
-    // artifact fetch
     let mut futures: Vec<Pin<Box<dyn Future<Output = Fallible<(PackageKey, Component)>> + Send>>> =
         vec![];
     for component in &dm.components {
@@ -143,16 +153,9 @@ async fn download_components(
             );
         } else {
             let cfg = cfg.clone();
-            let reg_entries = Arc::clone(&reg_entries);
-
             futures.push(
                 async move {
-                    let executable =
-                        find_artifact(&cfg, &*reg_entries, &pkg_key.package_id, &pkg_key.version)
-                            .await?;
-
-                    //
-
+                    let executable = find_artifact(&cfg, component).await?;
                     Ok((pkg_key, Component { executable }))
                 }
                     .boxed(),
@@ -165,21 +168,12 @@ async fn download_components(
 
     async fn find_artifact(
         cfg: &Config,
-        reg: &HashMap<PackageKey, RegistryEntry>,
-        package_id: &str,
-        version: &Version,
+        dam: &DeployedApplicationManifest,
     ) -> Fallible<Executable> {
-        let reg_entry = reg
-            .get(&PackageKey {
-                package_id: package_id.to_string(),
-                version: version.clone(),
-            })
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "unregistered"))?;
-
         let mut artifact_specific: Option<(&str, &str)> = None;
         for p in crate::platform::PLATFORM_TRIPLES {
-            if let Some(sha) = reg_entry.sha256s.get(*p) {
-                artifact_specific = Some((*p, sha));
+            if let Some(artifact) = dam.artifacts.get(*p) {
+                artifact_specific = Some((*p, &artifact.sha256));
                 break;
             }
         }
@@ -191,11 +185,11 @@ async fn download_components(
 
         let uri = format!(
             "{}/{}-v{}-{}",
-            cfg.artifacts, package_id, version, platform_triple
+            cfg.artifacts, dam.package_id, dam.version, platform_triple
         );
         let filename = &uri[cfg.artifacts.len() + 1..];
 
-        info!("fetching {} from {}", package_id, uri);
+        info!("fetching {} from {}", dam.package_id, uri);
         // FIXME: async
         let mut response = reqwest::get(&uri)?;
         // FIXME: add this information to the registry.
@@ -206,12 +200,12 @@ async fn download_components(
         if DEFAULT_MAX_ARTIFACT_SIZE < content_length {
             error!(
                 "file-size of {} is {} bytes - this exceeds the maximum artifact size",
-                package_id, content_length
+                dam.package_id, content_length
             );
             return Err(io::Error::new(io::ErrorKind::Other, "artifact too large").into());
         }
 
-        info!("file-size of {} is {} bytes", package_id, content_length);
+        info!("file-size of {} is {} bytes", dam.package_id, content_length);
 
         let mut fac = ExecutableFactory::new(filename, content_length.try_into()?)?;
         response.copy_to(&mut fac)?;
@@ -258,6 +252,8 @@ fn reify_service_connections(
             ExecSomething {
                 extras: builder.build(),
                 cfg: AppPreforkConfiguration {
+                    tenant_id: dm.tenant_id.clone(),
+                    deployment_name: dm.deployment_name.clone(),
                     package_id: component.package_id.clone(),
                     artifact: component_artifact.executable,
                     version: format!("{}", component.version),
