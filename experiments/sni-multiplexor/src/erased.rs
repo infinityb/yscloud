@@ -1,6 +1,6 @@
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::net::tcp::TcpStream;
-use tokio::net::unix::UnixStream;
+use tokio::net::TcpStream;
+use tokio::net::UnixStream;
 
 pub trait AsyncReadWrite: AsyncRead + AsyncWrite {}
 

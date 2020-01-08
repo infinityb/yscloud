@@ -12,18 +12,20 @@ yscloud-config-model = { path = "../../yscloud-config-model" }
 socket-traits = { path = "../socket-traits" }
 
 # external
-bytes = "0.4.12"
+bytes = "0.5.3"
 clap = "*"
 copy_arena = "0.1"
 env_logger = "0.6.1"
 failure = "0.1.5"
-futures-preview = { version = "=0.3.0-alpha.19" }
+futures = "0.3"
 log = "0.4"
 nix = "0.13"
 rand = "0.7"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-tokio = { version = "=0.2.0-alpha.6" }
-tokio-net = { version = "=0.2.0-alpha.6" }
-uuid = { version = "0.6", features = ["v4", "serde", "const_fn"] }
 smallvec = "0.6.10"
+tokio = { version = "0.2", features = ["full"] }
+trust-dns-resolver = "0.12.0"
+uuid = { version = "0.6", features = ["v4", "serde", "const_fn"] }
+histogram = "0.6"
+ppp = "1.2.0"

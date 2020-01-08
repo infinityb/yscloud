@@ -1,33 +1,52 @@
 use std::io;
 use std::pin::Pin;
+use std::sync::Arc;
+use std::time::Instant;
+use std::task::{Poll, Context};
 
+use ppp::{model::Header, parse_v1_header, parse_v2_header};
 use bytes::{Bytes, BytesMut};
 use copy_arena::{Allocator, Arena};
-use tokio::io::{AsyncRead, AsyncWrite};
+use futures::future::{self, Future};
+use futures::stream::{StreamExt};
 use log::{debug, warn};
-use std::time::Duration;
-use futures::future;
-use futures::task::Poll;
-use futures::future::Future;
-use futures::task::Context;
+use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::net::TcpStream;
 
 use socket_traits::{Socket, DynamicSocket, AsyncWriteClose};
 use tls::decode_client_hello;
+use tokio::sync::Mutex;
+use ksuid::Ksuid;
 
-use super::sni::{AlertError, get_server_names, ALERT_UNRECOGNIZED_NAME, ALERT_INTERNAL_ERROR};
+use crate::resolver::BackendManager;
+use crate::resolver2::HaproxyProxyVersion;
+use crate::sni_base::{SocketAddrPair, AlertError, get_server_names, ALERT_UNRECOGNIZED_NAME, ALERT_INTERNAL_ERROR};
+use crate::context::{self, Done};
+use crate::state_track::{Session, SessionManager};
+
+
+macro_rules! canceler_check {
+    ($canceler:expr, $otherfut:expr, $canceled:expr) => (
+        match Pin::new($canceler).await_with($otherfut).await {
+            std::result::Result::Ok(val) => val,
+            std::result::Result::Err(()) => $canceled,
+        }
+    );
+}
 
 enum SniDetectionError {
     Truncated,
 }
 
-fn detect_sni_name(scratch: &mut Allocator, data: &[u8], eof: bool) -> Result<Option<String>, AlertError> {
+fn detect_sni_name(scratch: &mut Allocator, data: &[u8], eof: bool) -> io::Result<Option<String>> {
     let client_hello = match decode_client_hello(scratch, data) {
         Ok(hello) => hello,
         Err(err) => {
             if err.is_truncated() && !eof {
                 return Ok(None);
             }
-            return Err(ALERT_INTERNAL_ERROR);
+            return Err(io::Error::new(io::ErrorKind::Other, "ALERT_INTERNAL_ERROR"));
+            // return Err(ALERT_INTERNAL_ERROR);
         }
     };
 
@@ -35,12 +54,14 @@ fn detect_sni_name(scratch: &mut Allocator, data: &[u8], eof: bool) -> Result<Op
         Ok(snames) => snames,
         Err(err) => {
             warn!("encountered {:?} while detecting SNI name", err);
-            return Err(ALERT_UNRECOGNIZED_NAME);
+            return Err(io::Error::new(io::ErrorKind::Other, "ALERT_UNRECOGNIZED_NAME"));
+            // return Err(ALERT_UNRECOGNIZED_NAME);
         }
     };
 
     if server_names.0.len() != 1 {
-        return Err(ALERT_INTERNAL_ERROR);
+        return Err(io::Error::new(io::ErrorKind::Other, "ALERT_INTERNAL_ERROR"));
+        // return Err(ALERT_INTERNAL_ERROR);
     }
 
     let server_name = server_names.0[0].0.to_string();
@@ -48,46 +69,40 @@ fn detect_sni_name(scratch: &mut Allocator, data: &[u8], eof: bool) -> Result<Op
     Ok(Some(server_name))
 }
 
-async fn read_client_hello_sni<R>(
-    mut reader: &mut R,
-    buffer: &mut BytesMut,
-    canceler: ()
-) -> io::Result<String> where R: AsyncRead + Unpin
-{
-    let mut arena = Arena::new();
-    let mut encountered_eof = false;
-    loop {
-        let length = read_into(&mut reader, buffer).await?;
-        if length == 0 {
-            encountered_eof = true;
+fn detect_haproxy_header(proxy_header_version: HaproxyProxyVersion, sdata: &[u8], eof: bool) -> io::Result<Option<(usize, ppp::model::Header)>> {
+    use ppp::error::ParseError;
+
+    let res = match proxy_header_version {
+        HaproxyProxyVersion::Version1 => parse_v1_header(sdata),
+        HaproxyProxyVersion::Version2 => parse_v2_header(sdata),
+    };
+    match res {
+        Ok((rest, header)) => {
+            Ok(Some((sdata.len() - rest.len(), header)))
         }
-
-        let mut allocator = arena.allocator();
-
-        match detect_sni_name(&mut allocator, &buffer[..], encountered_eof) {
-            Ok(Some(name)) => {
-                return Ok(name);
-            },
-            Ok(None) => (),
-            Err(err) => {
-                debug!(
-                    "failed to detect SNI name - bailing badly: {}",
-                    err
-                );
-                return Err(io::Error::new(io::ErrorKind::Other, "bad SNI handshake - terminated without alert"));
-            }
+        Err(ParseError::Incomplete) if eof => {
+            Err(io::Error::new(io::ErrorKind::Other, "incomplete handshake"))
+        }
+        Err(ParseError::Incomplete) => {
+            Ok(None)
+        }
+        Err(ParseError::Failure) => {
+            Err(io::Error::new(io::ErrorKind::Other, "invalid handshake"))
         }
     }
 }
 
-async fn dial_hostname(dialer_ctx: (), hostname: &str) -> io::Result<DynamicSocket> {
-    unimplemented!();
-}
 
-async fn read_into<'a, R>(source: &mut R, into: &mut BytesMut) -> io::Result<usize> where R: AsyncRead + Unpin {
+pub fn read_into<'a, R>(
+    source: &'a mut R,
+    into: &'a mut BytesMut,
+) -> impl Future<Output = io::Result<usize>> + 'a + Unpin
+where
+    R: AsyncRead + Unpin
+{
     struct AsyncReadAny<'a, R> where R: AsyncRead + Unpin {
-        source: &'a mut R,
-        into: &'a mut BytesMut,
+        source: Pin<&'a mut R>,
+        into: Pin<&'a mut BytesMut>,
     }
 
     impl<'a, R: AsyncRead + Unpin> Future for AsyncReadAny<'a, R>
@@ -95,19 +110,30 @@ async fn read_into<'a, R>(source: &mut R, into: &mut BytesMut) -> io::Result<usi
         type Output = io::Result<usize>;
 
         fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
-            
-            AsyncRead::poll_read_buf(Pin::new(&mut *self.source), cx, self.into)
+            let AsyncReadAny { ref mut source, ref mut into } = *self;
+            let into: &mut BytesMut = &mut *into;
+            AsyncRead::poll_read_buf(Pin::new(&mut *source), cx, into)
         }
     }
 
-
-    AsyncReadAny { source, into }.await
+    let source = Pin::new(source);
+    let into = Pin::new(into);
+    AsyncReadAny { source, into }
 }
 
-async fn write_from<W>(destination: &mut W, to_write: &mut Bytes) -> io::Result<usize> where W: AsyncWrite + Unpin {
+// Writes from `to_write` into `destination`, consuming the data in `to_write`
+pub fn write_from<'a, W>(
+    destination: &'a mut W,
+    to_write: &'a mut Bytes,
+) -> impl Future<Output = io::Result<usize>> + 'a + Unpin
+where
+    W: AsyncWrite + Unpin
+{
+    use std::task::Poll;
+
     struct AsyncWriteAny<'a, W> where W: AsyncWrite + Unpin {
-        destination: &'a mut W,
-        to_write: &'a mut Bytes,
+        destination: Pin<&'a mut W>,
+        to_write: Pin<&'a mut Bytes>,
     }
 
     impl<'a, W: AsyncWrite + Unpin> Future for AsyncWriteAny<'a, W>
@@ -115,42 +141,250 @@ async fn write_from<W>(destination: &mut W, to_write: &mut Bytes) -> io::Result<
         type Output = io::Result<usize>;
 
         fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
-            AsyncWrite::poll_write(Pin::new(&mut *self.destination), cx, &self.to_write[..])
+            let AsyncWriteAny { ref mut destination, ref mut to_write } = *self;
+
+            match AsyncWrite::poll_write(Pin::new(&mut *destination), cx, &to_write) {
+                Poll::Ready(Ok(wlen)) => {
+                    drop(to_write.split_to(wlen));
+                    Poll::Ready(Ok(wlen))
+                },
+                Poll::Ready(Err(err)) => Poll::Ready(Err(err)),
+                Poll::Pending => Poll::Pending,
+            }
         }
     }
 
-    AsyncWriteAny { destination, to_write }.await
+    AsyncWriteAny {
+        destination: Pin::new(destination),
+        to_write: Pin::new(to_write),
+    }
 }
 
-
-async fn sni_connect_and_copy<'sock, 'split, S>(client: &'sock mut S, canceler: ()) -> io::Result<()>
-    where S: Socket<'split>, 'sock: 'split 
+fn read_client_hello_sni<'a, R>(
+    source: &'a mut R,
+    into: &'a mut BytesMut,
+) -> impl Future<Output = io::Result<String>> + 'a + Unpin
+where
+    R: AsyncRead + Unpin
 {
-    use tokio::timer::delay_for;
+    struct AsyncReadClientHello<'a, R> where R: AsyncRead + Unpin {
+        source: Pin<&'a mut R>,
+        into: Pin<&'a mut BytesMut>,
+        arena: Arena,
+    }
+
+    impl<'a, R: AsyncRead + Unpin> Future for AsyncReadClientHello<'a, R>
+    {
+        type Output = io::Result<String>;
+
+        fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
+            let AsyncReadClientHello { ref mut source, ref mut into, ref mut arena } = *self;
+            let into: &mut BytesMut = &mut *into;
+            
+            loop {
+                return match AsyncRead::poll_read_buf(Pin::new(&mut *source), cx, into) {
+                    Poll::Ready(Ok(wlen)) => {
+                        let mut allocator = arena.allocator();
+                        match detect_sni_name(&mut allocator, &into[..], wlen == 0)? {
+                            Some(v) => Poll::Ready(Ok(v)),
+                            None => continue, // re-read, which should block and re-register us
+                        }
+                    },
+                    Poll::Ready(Err(err)) => Poll::Ready(Err(err)),
+                    Poll::Pending => Poll::Pending,
+                }
+            }
+        }
+    }
+
+    let source = Pin::new(source);
+    let into = Pin::new(into);
+    AsyncReadClientHello {
+        source,
+        into,
+        arena: Arena::new(),
+    }
+}
+
+fn read_haproxy_header<'a, R>(
+    proxy_header_version: HaproxyProxyVersion,
+    source: &'a mut R,
+    into: &'a mut BytesMut,
+) -> impl Future<Output = io::Result<ppp::model::Header>> + 'a + Unpin
+where
+    R: AsyncRead + Unpin
+{
+    struct AsyncReadHaproxyHeader<'a, R> where R: AsyncRead + Unpin {
+        proxy_header_version: HaproxyProxyVersion,
+        source: Pin<&'a mut R>,
+        into: Pin<&'a mut BytesMut>,
+    }
+
+    impl<'a, R: AsyncRead + Unpin> Future for AsyncReadHaproxyHeader<'a, R>
+    {
+        type Output = io::Result<ppp::model::Header>;
+
+        fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
+            let AsyncReadHaproxyHeader { proxy_header_version, ref mut source, ref mut into } = *self;
+            let into: &mut BytesMut = &mut *into;
+            loop {
+                return match AsyncRead::poll_read_buf(Pin::new(&mut *source), cx, into) {
+                    Poll::Ready(Ok(wlen)) => {
+                        match detect_haproxy_header(proxy_header_version, &into[..], wlen == 0)? {
+                            Some((sz, h)) => {
+                                drop(into.split_to(sz));
+                                Poll::Ready(Ok(h))
+                            }
+                            None => continue, // re-read, which should block and re-register us
+                        }
+                    },
+                    Poll::Ready(Err(err)) => Poll::Ready(Err(err)),
+                    Poll::Pending => Poll::Pending,
+                }
+            }
+        }
+    }
+
+    let source = Pin::new(source);
+    let into = Pin::new(into);
+    AsyncReadHaproxyHeader {
+        proxy_header_version,
+        source,
+        into,
+    }
+}
+
+async fn dial_hostname(dialer_ctx: (), hostname: &str) -> io::Result<DynamicSocket> {
+    let xx = TcpStream::connect("aibi.yshi.org:443").await?;
+
+    Ok(xx.into())
+}
+
+pub struct ClientCtx {
+    pub proxy_header_version: Option<HaproxyProxyVersion>,
+}
+
+impl ClientCtx {
+}
+
+pub async fn sni_connect_and_copy(
+    sessman: Arc<Mutex<SessionManager>>,
+    backend_man: Arc<Mutex<BackendManager>>,
+    mut client_addr: SocketAddrPair,
+    mut client: TcpStream,
+    client_ctx: ClientCtx,
+    // canceler: Done,
+) -> io::Result<()>
+{
+    use tokio::time::{timeout, Duration};
+    let client_hello_timeout = Duration::new(4, 0);
+
+    let session_id = Ksuid::generate();
+
+    let mut header_timeout = futures::stream::once(tokio::time::delay_for(client_hello_timeout));
+    let (holder, mut canceler) = context::channel();
+
+    {
+        let mut sessman = sessman.lock().await;
+        sessman.add_session(Session::new(
+            session_id,
+            Instant::now(),
+            client_addr.clone(),
+            holder,
+        ));
+    }
 
     let dialer_ctx = ();
 
-    let local_timer = delay_for(Duration::new(4, 0));
-
     let mut client_to_backend_bytes: u64 = 0;
     let mut backend_to_client_bytes: u64 = 0;
-
-    let (mut client_read, mut client_write) = client.split();
+    
     let mut backend_write_buf = BytesMut::with_capacity(64 * 1024);
 
-    let sni_hostname = read_client_hello_sni(&mut client_read, &mut backend_write_buf, canceler).await?;
+    if let Some(haproxy_v) = client_ctx.proxy_header_version {
+        let res = future::select(
+            header_timeout.next(),
+            read_haproxy_header(haproxy_v, &mut client, &mut backend_write_buf)).await;
+
+        match res {
+            futures::future::Either::Left((timeout, _next_fut)) => {
+                warn!("HaproxyHeader timeout error: {:?}", timeout);
+
+                let mut sessman = sessman.lock().await;
+                sessman.mark_shutdown(&session_id);
+
+                return Ok(());
+            },
+            futures::future::Either::Right((Ok(haproxy_header), _timeout_fut)) => {
+                let haproxy_header: Header = haproxy_header;
+
+                //
+            },
+            futures::future::Either::Right((Err(err), _timeout_fut)) => {
+                warn!("HaproxyHeader read error: {:?}", err);
+
+                let mut sessman = sessman.lock().await;
+                sessman.mark_shutdown(&session_id);
+
+                return Ok(());
+            },
+        }
+
+        // Pin::new(&mut canceler).await_with(header_timeout.next())
+    }
+
+
+    let sni_hostname: String;
+    match Pin::new(&mut canceler).await_with(timeout(client_hello_timeout, read_client_hello_sni(&mut client, &mut backend_write_buf))).await {
+        Ok(Ok(Ok(hostname))) => sni_hostname = hostname,
+        Ok(Ok(Err(err))) => {
+            warn!("ClientHello read error: {:?}", err);
+
+            // replace all these with a guard.
+            let mut sessman = sessman.lock().await;
+            sessman.mark_shutdown(&session_id);
+
+            return Ok(());
+        }
+        Ok(Err(..)) => {
+            warn!("ClientHello read timed out - terminating");
+
+            let mut sessman = sessman.lock().await;
+            sessman.mark_shutdown(&session_id);
+
+            return Ok(());
+        }
+        Err(()) => {
+            warn!("connection destroyed");
+
+            let mut sessman = sessman.lock().await;
+            sessman.mark_shutdown(&session_id);
+
+            return Ok(());
+        }
+    };
+
+    
     debug!("want to dial {:?}", sni_hostname);
     let mut backend = dial_hostname(dialer_ctx, &sni_hostname).await?;
+
+    let (mut client_read, mut client_write) = client.split();
     let (mut backend_read, mut backend_write) = backend.split();
 
+    let canceler_copy = canceler.clone();
     let client_to_backend = async {
-        loop {
+        let mut canceler = canceler_copy;
+        'taskloop: loop {
             // to skip reading in the first iteration
+            let length;
             if backend_write_buf.len() == 0 {
-                read_into(&mut Pin::new(&mut client_read), &mut backend_write_buf).await?;
+                let read_fut = read_into(&mut client_read, &mut backend_write_buf);
+                length = canceler_check!(&mut canceler, read_fut, break 'taskloop)?;
+            } else {
+                length = backend_write_buf.len();
             }
 
-            let mut to_write = backend_write_buf.freeze();
+            let mut to_write = backend_write_buf.split().freeze();
             
             if to_write.is_empty() {
                 // EOF was reached.
@@ -158,25 +392,31 @@ async fn sni_connect_and_copy<'sock, 'split, S>(client: &'sock mut S, canceler: 
             }
 
             while !to_write.is_empty() {
-                let length = write_from(&mut backend_write, &mut to_write).await?;
+                let write_fut = write_from(&mut backend_write, &mut to_write);
+                let length = canceler_check!(&mut canceler, write_fut, break 'taskloop)?;
                 drop(to_write.split_to(length));
             }
 
-            backend_write_buf = to_write.try_mut().unwrap();
-            backend_write_buf.clear();
+            let mut sessman = sessman.lock().await;
+            sessman.handle_xmit_client_to_backend(&session_id, length as u64);
         }
 
         backend_write.close_write()?;
+
+        let mut sessman = sessman.lock().await;
+        sessman.mark_shutdown_write(&session_id);
 
         io::Result::Ok(())
     };
 
     let backend_to_client = async {
         let mut client_write_buf = BytesMut::with_capacity(64 * 1024);
-        loop {
-            read_into(&mut Pin::new(&mut backend_read), &mut client_write_buf).await?;
-            
-            let mut to_write = client_write_buf.freeze();
+
+        'taskloop: loop {
+            let read_fut = read_into(&mut backend_read, &mut client_write_buf);
+            let length = canceler_check!(&mut canceler, read_fut, break 'taskloop)?;
+
+            let mut to_write = client_write_buf.split().freeze();
 
             if to_write.is_empty() {
                 // EOF was reached.
@@ -184,15 +424,20 @@ async fn sni_connect_and_copy<'sock, 'split, S>(client: &'sock mut S, canceler: 
             }
 
             while !to_write.is_empty() {
-                let length = write_from(&mut client_write, &mut to_write).await?;
+                let write_fut = write_from(&mut client_write, &mut to_write);
+                let length = canceler_check!(&mut canceler, write_fut, break 'taskloop)?;
+
                 drop(to_write.split_to(length));
             }
 
-            client_write_buf = to_write.try_mut().unwrap();
-            client_write_buf.clear();
+            let mut sessman = sessman.lock().await;
+            sessman.handle_xmit_backend_to_client(&session_id, length as u64);
         }
 
         client_write.close_write()?;
+
+        let mut sessman = sessman.lock().await;
+        sessman.mark_shutdown_read(&session_id);
 
         io::Result::Ok(())
     };
@@ -201,6 +446,9 @@ async fn sni_connect_and_copy<'sock, 'split, S>(client: &'sock mut S, canceler: 
     
     res1?;
     res2?;
+
+    let mut sessman = sessman.lock().await;
+    sessman.mark_shutdown(&session_id);
 
     Ok(())
 }

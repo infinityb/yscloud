@@ -14,23 +14,26 @@ use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
 use tokio::net::UnixListener;
 use tokio::sync::Mutex;
-use tokio_net::driver::Handle;
 use yscloud_config_model::AppConfiguration;
 
-mod abortable_stream;
+// mod abortable_stream;
 mod config;
+mod context;
 mod dialer;
 mod erased;
+mod ioutil;
 mod mgmt_proto;
+mod resolver2;
 mod resolver;
-mod sni;
-// mod sni2;
+mod sni2;
+// mod sni;
+mod sni_base;
 mod state_track;
 
 use self::config::ResolverInit;
 use self::mgmt_proto::{start_management_client};
 use self::resolver::{NetworkLocation, BackendManager, BackendSet};
-use self::sni::{start_client, SocketAddrPair};
+use self::sni_base::SocketAddrPair;
 use self::state_track::SessionManager;
 
 const CARGO_PKG_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -142,10 +145,10 @@ fn main() {
     let sni_director_sock = sni_director_sock.expect("sni_director_sock");
     let management_sock = management_sock.expect("management_sock");
 
-    let data_listener: TcpListener =
-        TcpListener::from_std(sni_director_sock, &Handle::default()).unwrap();
-    let mgmt_listener: UnixListener =
-        UnixListener::from_std(management_sock, &Handle::default()).unwrap();
+    let mut data_listener: TcpListener =
+        TcpListener::from_std(sni_director_sock).unwrap();
+    let mut mgmt_listener: UnixListener =
+        UnixListener::from_std(management_sock).unwrap();
 
     let resolver_init: ResolverInit = serde_json::from_str(&extras_str).unwrap();
 
@@ -153,13 +156,11 @@ fn main() {
     for (k, v) in resolver_init.hostnames.into_iter() {
         backends.insert(
             k,
-            BackendSet {
-                locations: vec![NetworkLocation {
-                    use_haproxy_header_v: v.use_haproxy_header,
-                    address: v.location,
-                    stats: (),
-                }],
-            },
+            BackendSet::from_list(vec![NetworkLocation {
+                use_haproxy_header_v: v.use_haproxy_header,
+                address: v.location,
+                stats: (),
+            }]),
         );
     }
 
@@ -180,19 +181,19 @@ fn main() {
             let (next_item, tail) = mgmt_incoming.into_future().await;
             mgmt_incoming = tail;
 
-            let socket = match next_item {
-                Some(socket) => socket,
+            match next_item {
+                Some(Ok(socket)) => {
+                    tokio::spawn(async move {
+                        if let Err(err) = start_management_client(sessman, resolver, socket).await {
+                            warn!("management client terminated: {}", err);
+                        }
+                    });
+                },
+                Some(Err(err)) => {
+                    warn!("failed to accept a socket: {}", err);
+                }
                 None => break,
             };
-
-            let mut socket = socket.expect("FIXME");
-
-            tokio::spawn(async move {
-                let (socket_reader, socket_writer) = socket.split();
-                if let Err(err) = start_management_client(sessman, resolver, socket_reader, socket_writer).await {
-                    warn!("management client terminated: {}", err);
-                }
-            });
         }
     };
 
@@ -235,21 +236,21 @@ fn main() {
             let data_sessman = Arc::clone(&data_sessman);
             let data_resolver = Arc::clone(&data_resolver);
             tokio::spawn(async move {
-                let (client_reader, client_writer) = socket.split();
-                start_client(
+                sni2::sni_connect_and_copy(
                     data_sessman,
                     data_resolver,
                     client_conn,
-                    client_reader,
-                    client_writer,
+                    socket,
+                    sni2::ClientCtx {
+                        proxy_header_version: None,
+                    },
                 ).await;
             });
         }
     };
 
     let mut runtime_builder = tokio::runtime::Builder::new();
-    runtime_builder.panic_handler(|err| std::panic::resume_unwind(err));
-    let runtime = runtime_builder.build().unwrap();
+    let mut runtime = runtime_builder.build().unwrap();
 
     runtime.block_on(future::join(mgmt_server, data_server).map(|_| ()));
 }

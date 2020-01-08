@@ -5,8 +5,9 @@ use std::time::{Duration, Instant};
 
 use ksuid::Ksuid;
 
-use crate::abortable_stream::AbortHandle;
-use crate::sni::SocketAddrPair;
+use crate::sni_base::SocketAddrPair;
+use crate::context;
+
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionState {
@@ -34,7 +35,7 @@ impl SessionState {
 }
 
 pub struct Session {
-    abort_handle: Option<AbortHandle>,
+    holder: Option<context::Holder>,
     exportable: SessionExport,
 }
 
@@ -66,10 +67,10 @@ impl Session {
         session_id: Ksuid,
         start_time: Instant,
         client_addr: SocketAddrPair,
-        aborter: AbortHandle,
+        holder: context::Holder,
     ) -> Session {
         Session {
-            abort_handle: Some(aborter),
+            holder: Some(holder),
             exportable: SessionExport {
                 session_id,
                 start_time: start_time,
@@ -111,8 +112,8 @@ impl SessionManager {
 
     pub fn destroy(&mut self, ksuid: &Ksuid) -> Result<(), ()> {
         if let Some(sess) = self.sessions.get_mut(ksuid) {
-            if let Some(handle) = sess.abort_handle.take() {
-                drop(handle);
+            if let Some(holder) = sess.holder.take() {
+                drop(holder);
                 return Ok(());
             }
         }

@@ -79,16 +79,6 @@ pub fn abortable_stream_pair() -> (AbortHandle, AbortableStreamFactory) {
 }
 
 impl AbortableStreamFactory {
-    pub fn with_stream<S>(&self, stream: S) -> AbortableStream<S>
-    where
-        S: Stream + Unpin,
-    {
-        AbortableStream {
-            aborter: self.0.clone(),
-            stream,
-        }
-    }
-
     pub fn with_try_stream<S, T, E>(&self, stream: S) -> AbortableTryStream<S, T, E>
     where
         S: Stream<Item = Result<T, E>> + Unpin,

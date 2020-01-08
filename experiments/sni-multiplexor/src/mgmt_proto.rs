@@ -1,20 +1,21 @@
 use std::io;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::borrow::Cow;
+use std::collections::BTreeSet;
 
-use bytes::BytesMut;
+use bytes::{Bytes, BytesMut};
 use failure::{Error, Fail};
 use ksuid::Ksuid;
-use tokio::codec::{Decoder, Encoder};
-use tokio::codec::{FramedRead, FramedWrite};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::Mutex;
-use log::{warn, info};
+use log::{debug, info};
 
 use crate::resolver::BackendManager;
 use crate::resolver::{NetworkLocation, NetworkLocationAddress};
-use crate::sni::SocketAddrPair;
+use crate::sni_base::SocketAddrPair;
 use crate::state_track::{SessionExport, SessionManager};
+use crate::ioutil::{read_into, write_from};
 
 #[derive(Debug, Fail)]
 #[fail(display = "protocol error")]
@@ -23,33 +24,26 @@ struct MgmtProtocolError {
     message: String,
 }
 
-pub struct AsciiManagerServer {}
-
-impl AsciiManagerServer {
-    pub fn new() -> AsciiManagerServer {
-        AsciiManagerServer {}
-    }
-}
-
 #[derive(Debug)]
 pub enum AsciiManagerRequest {
     PrintActiveSessions,
     DestroySession(Ksuid),
-    ReplaceBackend(ReplaceBackend),
+    ReplaceBackend(BackendArgs),
+    AddHeldBackend(BackendArgs),
     DumpBackends,
     RemoveBackends(RemoveBackends),
     Quit,
 }
 
-#[derive(Debug)]
-pub struct ReplaceBackend {
+#[derive(Clone, Debug)]
+pub struct BackendArgs {
     hostname: String,
     target_address: NetworkLocation,
-    flags: Vec<ReplaceBackendFlag>,
+    flags: Vec<BackendArgsFlags>,
 }
 
-#[derive(Debug)]
-pub enum ReplaceBackendFlag {
+#[derive(Debug, Clone)]
+pub enum BackendArgsFlags {
     UseHaproxy(i8),
 }
 
@@ -75,7 +69,7 @@ where
     Ok(ksuid)
 }
 
-fn replace_backend_from_str_iter<'a, I>(mut parts: I) -> Result<ReplaceBackend, Error>
+fn backend_args_from_str_iter<'a, I>(mut parts: I) -> Result<BackendArgs, Error>
 where
     I: Iterator<Item = &'a str>,
 {
@@ -146,7 +140,7 @@ where
         stats: (),
     };
 
-    Ok(ReplaceBackend {
+    Ok(BackendArgs {
         hostname: hostname.into(),
         target_address,
         flags: Vec::new(),
@@ -167,6 +161,33 @@ where
     })
 }
 
+fn decode_ascii_manager_request(src: &mut BytesMut) -> Result<Option<AsciiManagerRequest>, Error> {
+    use std::str::from_utf8;
+
+    let line = match src.iter().position(|x| *x == b'\n') {
+        Some(eol) => src.split_to(eol + 1).freeze(),
+        None => {
+            if 4096 < src.len() {
+                return Err(MgmtProtocolError {
+                    recoverable: false,
+                    message: "line too long - connection terminated".to_string(),
+                }
+                .into());
+            }
+
+            return Ok(None);
+        }
+    };
+
+    let mut line = from_utf8(&*line).map_err(|e| MgmtProtocolError {
+        recoverable: false,
+        message: format!("could not process line: {}", e),
+    })?;
+
+    line = line.trim();
+    AsciiManagerRequest::from_str(line).map(Some)
+}
+
 impl FromStr for AsciiManagerRequest {
     type Err = Error;
 
@@ -184,7 +205,10 @@ impl FromStr for AsciiManagerRequest {
                 destroy_session_from_str_iter(parts).map(AsciiManagerRequest::DestroySession)
             }
             "replace-backend" => {
-                replace_backend_from_str_iter(parts).map(AsciiManagerRequest::ReplaceBackend)
+                backend_args_from_str_iter(parts).map(AsciiManagerRequest::ReplaceBackend)
+            }
+            "add-held-backend" => {
+                backend_args_from_str_iter(parts).map(AsciiManagerRequest::AddHeldBackend)
             }
             "remove-backends" => {
                 remove_backends_from_str_iter(parts).map(AsciiManagerRequest::RemoveBackends)
@@ -199,10 +223,10 @@ impl FromStr for AsciiManagerRequest {
     }
 }
 
-pub enum AsciiManagerResponse {
-    PrintActive(Vec<SessionExport>),
+pub enum AsciiManagerResponse<'a> {
+    PrintActive(Cow<'a, [SessionExport]>),
     GenericOk,
-    GenericError,
+    GenericError(Cow<'a, str>),
     DumpBackends(BackendManager),
 }
 
@@ -218,6 +242,12 @@ where
         SocketAddrPair::V6(ref ap) => {
             write!(wri, "[{}]:{},", ap.local_addr.ip(), ap.local_addr.port())?;
             write!(wri, "[{}]:{} ", ap.peer_addr.ip(), ap.peer_addr.port())?;
+        }
+        SocketAddrPair::Unix => {
+            write!(wri, "unix,unix ")?;
+        }
+        SocketAddrPair::Unknown => {
+            write!(wri, "unknown,unknown ")?;
         }
     }
     Ok(())
@@ -284,122 +314,95 @@ fn encode_print_active_sessions(
     Ok(())
 }
 
-impl Encoder for AsciiManagerServer {
-    type Item = AsciiManagerResponse;
-
-    type Error = Error;
-
-    fn encode(&mut self, item: Self::Item, dst: &mut BytesMut) -> Result<(), Self::Error> {
-        let mut scratch = vec![0; 1024];
-
-        match item {
-            AsciiManagerResponse::PrintActive(ref sessinfo) => {
-                encode_print_active_sessions(&mut scratch, dst, sessinfo)?;
+fn encode_ascii_manager_response<'a>(item: &AsciiManagerResponse<'a>, dst: &mut BytesMut) -> Result<(), Error> {
+    let mut scratch = [0; 1024];
+    match *item {
+        AsciiManagerResponse::PrintActive(ref sessinfo) => {
+            encode_print_active_sessions(&mut scratch[..], dst, sessinfo)?;
+        }
+        AsciiManagerResponse::GenericOk => {
+            dst.extend_from_slice(b"OK\n");
+        }
+        AsciiManagerResponse::GenericError(ref message) => {
+            dst.extend_from_slice(b"ERROR");
+            if message.len() > 0 {
+                dst.extend_from_slice(b": ");
+                dst.extend_from_slice(message.as_bytes());   
             }
-            AsciiManagerResponse::GenericOk => {
-                dst.extend_from_slice(b"OK\n");
+            dst.extend_from_slice(b"\n");
+        }
+        AsciiManagerResponse::DumpBackends(ref bm) => {
+            let data = serde_json::to_string(&*bm.backends).unwrap();
+            dst.extend_from_slice(data.as_bytes());
+            dst.extend_from_slice(b"\nOK\n");
+        }
+    }
+
+    Ok(())
+}
+
+pub async fn start_management_client<Socket>(
+    sessman: Arc<Mutex<SessionManager>>,
+    backends: Arc<Mutex<BackendManager>>,
+    mut socket: Socket,
+) -> Result<(), Error>
+where
+    Socket: AsyncRead + AsyncWrite + Unpin,
+{
+    let mut read_buf = BytesMut::with_capacity(1024);
+    let mut write_buf = BytesMut::with_capacity(16 * 1024);
+    let mut to_write: Bytes = write_buf.split_off(0).freeze();
+
+    let mut held_backends: BTreeSet<(String, Ksuid)> = BTreeSet::new();
+
+    loop {
+        if to_write.len() > 0 {
+            if write_from(&mut socket, &mut to_write).await? == 0 {
+                break;
             }
-            AsciiManagerResponse::GenericError => {
-                dst.extend_from_slice(b"ERROR\n");
-            }
-            AsciiManagerResponse::DumpBackends(ref bm) => {
-                let data = serde_json::to_string(&*bm.backends).unwrap();
-                dst.extend_from_slice(data.as_bytes());
-                dst.extend_from_slice(b"\nOK\n");
+
+            if to_write.len() > 0 {
+                continue;
             }
         }
 
-        Ok(())
-    }
-}
+        if read_into(&mut socket, &mut read_buf).await? == 0 {
+            break;
+        }
 
-impl Decoder for AsciiManagerServer {
-    type Item = AsciiManagerRequest;
-
-    type Error = Error;
-
-    fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
-        use std::str::from_utf8;
-
-        let line = match src.iter().position(|x| *x == b'\n') {
-            Some(eol) => src.split_to(eol + 1).freeze(),
-            None => {
-                if 4096 < src.len() {
-                    return Err(MgmtProtocolError {
-                        recoverable: false,
-                        message: "line too long - connection terminated".to_string(),
-                    }
-                    .into());
-                }
-
-                return Ok(None);
-            }
-        };
-
-        let mut line = from_utf8(&*line).map_err(|e| MgmtProtocolError {
-            recoverable: false,
-            message: format!("could not process line: {}", e),
-        })?;
-
-        line = line.trim();
-        AsciiManagerRequest::from_str(line).map(Some)
-    }
-}
-
-pub async fn start_management_client<ClientRead, ClientWrite>(
-    sessman: Arc<Mutex<SessionManager>>,
-    backends: Arc<Mutex<BackendManager>>,
-    socket_reader: ClientRead,
-    socket_writer: ClientWrite,
-) -> Result<(), Error>
-where
-    ClientRead: AsyncRead + Unpin,
-    ClientWrite: AsyncWrite + Unpin,
-{
-    use futures::sink::SinkExt;
-    use futures::stream::StreamExt;
-
-    let mut stream = FramedRead::new(socket_reader, AsciiManagerServer::new());
-    let mut sink = FramedWrite::new(socket_writer, AsciiManagerServer::new());
-
-    loop {
-        let (next_item, stream_tail) = stream.into_future().await;
-        stream = stream_tail;
-
-        let item = match next_item {
-            Some(item) => item,
-            None => {
-                break;
-            }
-        };
-        let item = match item {
-            Ok(item) => item,
+        let request = match decode_ascii_manager_request(&mut read_buf) {
+            Ok(Some(v)) => v,
+            Ok(None) => continue,
             Err(err) => {
                 if let Some(mgmt_err) = err.downcast_ref::<MgmtProtocolError>() {
                     if mgmt_err.recoverable {
-                        if let Err(sink_err) = sink.send(AsciiManagerResponse::GenericError).await {
-                            warn!("failed to push to sink: {}", sink_err);
-                        } else {
-                            continue;
-                        }
+                        let item = AsciiManagerResponse::GenericError(Cow::Borrowed(&mgmt_err.message));
+                        encode_ascii_manager_response(&item, &mut write_buf)?;
+                        to_write = write_buf.split().freeze();
+                        continue;
                     }
                 }
                 return Err(err);
             }
         };
 
-        if let AsciiManagerRequest::Quit = item {
+        if let AsciiManagerRequest::Quit = request {
             break;
         }
 
-        let response = handle_query(&sessman, &backends, item).await?;
-        if let Err(sink_err) = sink.send(response).await {
-            warn!("failed to push to sink: {}", sink_err);
-        }
+        let response = handle_query(&sessman, &backends, request, &mut held_backends).await?;
+        encode_ascii_manager_response(&response, &mut write_buf)?;
+        to_write = write_buf.split().freeze();
     }
 
-    if let Err(sink_err) = crate::abortable_stream::SinkCloser::new(sink).await {
-        warn!("failed to close sink: {}", sink_err);
+    if held_backends.len() > 0 {
+        debug!("destroying held bindings...");
+
+        let mut backends = backends.lock().await;
+        for h in held_backends.into_iter() {
+            let h: (String, Ksuid) = h;
+            backends.remove_backend(&h.0, h.1);
+        }
     }
 
     info!("mgmt client close completed");
@@ -411,24 +414,31 @@ async fn handle_query(
     sessman: &Arc<Mutex<SessionManager>>,
     backend_man: &Arc<Mutex<BackendManager>>,
     req: AsciiManagerRequest,
-) -> Result<AsciiManagerResponse, Error> {
+    held_backends: &mut BTreeSet<(String, Ksuid)>,
+) -> Result<AsciiManagerResponse<'static>, Error> {
     match req {
         AsciiManagerRequest::Quit => unreachable!(),
         AsciiManagerRequest::PrintActiveSessions => {
             let sessions = sessman.lock().await;
             let sessions = sessions.get_sessions();
-            Ok(AsciiManagerResponse::PrintActive(sessions))
+            Ok(AsciiManagerResponse::PrintActive(Cow::Owned(sessions)))
         }
         AsciiManagerRequest::DestroySession(ref sess_id) => {
             let mut sessions = sessman.lock().await;
             match sessions.destroy(sess_id) {
                 Ok(()) => Ok(AsciiManagerResponse::GenericOk),
-                Err(()) => Ok(AsciiManagerResponse::GenericError),
+                Err(()) => Ok(AsciiManagerResponse::GenericError(Cow::Borrowed(""))),
             }
         }
         AsciiManagerRequest::DumpBackends => {
             let backends = backend_man.lock().await;
             Ok(AsciiManagerResponse::DumpBackends(BackendManager::clone(&backends)))
+        }
+        AsciiManagerRequest::AddHeldBackend(repl) => {
+            let mut backends = backend_man.lock().await;
+            let bid = backends.add_backend(&repl.hostname, repl.target_address);
+            held_backends.insert((repl.hostname, bid));
+            Ok(AsciiManagerResponse::GenericOk)
         }
         AsciiManagerRequest::ReplaceBackend(repl) => {
             let mut backends = backend_man.lock().await;

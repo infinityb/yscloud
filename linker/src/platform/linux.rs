@@ -269,7 +269,10 @@ fn exec_artifact_child(ext: &ExecExtras, c: &AppPreforkConfiguration) -> io::Res
         OFlag::O_RDWR | OFlag::O_TMPFILE,
         Mode::S_IRUSR | Mode::S_IWUSR,
     )
-    .map_err(io_other)?;
+    .map_err(|e| {
+        warn!("error opening temporary: {:?}", e);
+        io_other(e)
+    })?;
 
     let data = serde_json::to_string(&app_config)?;
     let data_len =

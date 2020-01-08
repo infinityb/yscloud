@@ -200,12 +200,16 @@ fn exec_artifact_child(e: &ExecExtras, c: AppPreforkConfiguration) -> io::Result
         c.instance_id,
         thread_rng().gen::<u64>()
     );
+
     let tmpfile = open(
         &path as &str,
         OFlag::O_CREAT | OFlag::O_RDWR,
         Mode::S_IRUSR | Mode::S_IWUSR,
     )
-    .map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
+    .map_err(|err| {
+        event!(Level::WARN, "error opening temporary ({}:{}): {:?}", file!(), line!(), err);
+        io::Error::new(io::ErrorKind::Other, err)
+    })?;
 
     if let Err(err) = unlink(&path as &str) {
         event!(Level::WARN, "failed to unlink temporary file {}: {}", path, err);
@@ -225,7 +229,10 @@ fn exec_artifact_child(e: &ExecExtras, c: AppPreforkConfiguration) -> io::Result
     ];
 
     event!(Level::TRACE, "running {} {:?} in {} -- {}", package_id, arguments, e.workdir.display(), data);
-    nix::unistd::chdir(&e.workdir).map_err(io_other)?;
+    nix::unistd::chdir(&e.workdir).map_err(|err| {
+        event!(Level::WARN, "error changing directory to {:?} ({}:{}): {:?}", e.workdir, file!(), line!(), err);
+        io_other(err)
+    })?;
 
     execute_child(&ExecConfig {
         executable: c.artifact,

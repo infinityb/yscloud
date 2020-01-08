@@ -27,7 +27,7 @@ uuid = { version = "0.6", features = ["v4", "serde"] }
 futures-preview = "=0.3.0-alpha.19"
 failure = "0.1.5"
 reqwest = "0.9.20"
-tokio = "=0.2.0-alpha.6"
+tokio = { version = "0.2", features = ["full"] }
 sha2 = "0.8.0"
 sha3 = "0.8.2"
 digest = "0.8.0"

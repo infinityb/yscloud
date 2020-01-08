@@ -1,15 +1,18 @@
-use std::collections::BTreeMap;
+use std::collections::{btree_map, BTreeMap};
 use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use log::info;
 use futures::future;
 use rand::seq::SliceRandom;
 use serde::{Deserialize, Serialize};
+use ksuid::Ksuid;
 
-use crate::sni::ALERT_UNRECOGNIZED_NAME;
+
+use crate::sni_base::ALERT_UNRECOGNIZED_NAME;
 
 pub trait Resolver2 {
     type ResolveFuture: Future<Output = io::Result<BackendSet>>;
@@ -39,7 +42,19 @@ pub enum NetworkLocationAddress {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "snake_case")]
 pub struct BackendSet {
-    pub locations: Vec<NetworkLocation>,
+    pub locations: BTreeMap<Ksuid, NetworkLocation>,
+}
+
+impl BackendSet {
+    pub fn from_list(loc_list: Vec<NetworkLocation>) -> BackendSet {
+        let mut locations = BTreeMap::new();
+
+        for v in loc_list {
+            locations.insert(Ksuid::generate(), v);
+        }
+
+        BackendSet { locations }
+    }
 }
 
 // #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -64,13 +79,58 @@ impl NetworkLocation {
 }
 
 impl BackendManager {
+    pub fn add_backend(&mut self, hostname: &str, nl: NetworkLocation) -> Ksuid {
+        let mut backends = BTreeMap::clone(&*self.backends);
+
+        info!("adding {} backend with: {:?}", hostname, nl);
+        let backend_id = Ksuid::generate();
+
+        match backends.entry(hostname.to_string()) {
+            btree_map::Entry::Occupied(mut occ) => {
+                let backend_set = occ.get_mut();
+                backend_set.locations.insert(backend_id, nl);
+                println!("backends: {:#?}", backend_set.locations);
+            }
+            btree_map::Entry::Vacant(vac) => {
+                let mut locations = BTreeMap::new();
+                locations.insert(backend_id, nl);
+                vac.insert(BackendSet { locations });
+            }
+        }
+
+        self.backends = Arc::new(backends);
+
+        backend_id
+    }
+
+    pub fn remove_backend(&mut self, hostname: &str, nl: Ksuid) {
+        let mut backends = BTreeMap::clone(&*self.backends);
+
+        info!("removing a backend from {}: {:?}", hostname, nl);
+
+        if let btree_map::Entry::Occupied(mut occ) = backends.entry(hostname.to_string()) {
+            let backend_set = occ.get_mut();
+
+            backend_set.locations.remove(&nl);
+            let backend_location_count = backend_set.locations.len();
+            drop(backend_set);
+
+            if backend_location_count == 0 {
+                occ.remove_entry();
+            }
+        }
+
+        self.backends = Arc::new(backends);
+    }
+
     pub fn replace_backend(&mut self, hostname: &str, nl: NetworkLocation) {
         let mut backends = BTreeMap::clone(&*self.backends);
+
+        info!("replacing {} backend with: {:?}", hostname, nl);
+
         backends.insert(
             hostname.to_string(),
-            BackendSet {
-                locations: vec![nl],
-            },
+            BackendSet::from_list(vec![nl]),
         );
         self.backends = Arc::new(backends);
     }
@@ -80,6 +140,7 @@ impl BackendManager {
         backends.remove(hostname);
         self.backends = Arc::new(backends);
     }
+
 
     fn sync_resolve(&self, hostname: &str) -> io::Result<BackendSet> {
         let backend_set = self
@@ -101,7 +162,6 @@ impl Resolver2 for BackendManager {
 
 fn backend_set_prune(bs: &BackendSet) -> BackendSet {
     let mut rng = &mut rand::thread_rng();
-    BackendSet {
-        locations: bs.locations.choose_multiple(&mut rng, 1).cloned().collect(),
-    }
+    let vv: Vec<_> = bs.locations.iter().map(|v| v.1.clone()).collect();
+    BackendSet::from_list(vv.choose_multiple(&mut rng, 1).cloned().collect())
 }

@@ -1,7 +1,6 @@
 use std::fmt::{self, Write as _Write};
 use std::sync::Arc;
 use std::io;
-use std::net::{SocketAddr, SocketAddrV4, SocketAddrV6};
 use std::time::{Duration, Instant};
 
 use bytes::{Bytes, BytesMut};
@@ -15,13 +14,11 @@ use tokio::codec::{Decoder, Encoder};
 use tokio::future::FutureExt;
 use tokio::io::AsyncWriteExt;
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::net::tcp::TcpStream;
-use tokio::net::unix::UnixStream;
+use tokio::net::{TcpStream, UnixStream};
 use tokio::sync::Mutex;
 use tokio::codec::{FramedRead, FramedWrite};
 
-
-use tls::{ClientHello, Extension, ExtensionServerName, decode_client_hello};
+use tls::decode_client_hello;
 
 use crate::abortable_stream::{
     abortable_stream_pair, AbortTryStreamError, AbortableStreamFactory, AbortableTryStream,
@@ -29,34 +26,14 @@ use crate::abortable_stream::{
 use crate::erased::NetworkStream;
 use crate::resolver::{BackendManager, NetworkLocationAddress, Resolver2};
 use crate::state_track::{Session, SessionManager};
-
+use crate::sni_base::{get_server_names, ALERT_INTERNAL_ERROR, SocketAddrPair};
 
 const DEFAULT_SNI_DETECTOR_MAX_LEN: usize = 20480;
-
-pub const ALERT_INTERNAL_ERROR: AlertError = AlertError {
-    alert_description: 80,
-};
-pub const ALERT_UNRECOGNIZED_NAME: AlertError = AlertError {
-    alert_description: 112,
-};
 
 #[derive(Debug)]
 enum Direction {
     BackendToClient,
     ClientToBackend,
-}
-
-#[derive(Debug, Copy, Clone)]
-pub struct AlertError {
-    alert_description: u8,
-}
-
-impl std::error::Error for AlertError {}
-
-impl fmt::Display for AlertError {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "alert #{}", self.alert_description)
-    }
 }
 
 #[derive(Debug)]
@@ -181,69 +158,6 @@ impl Decoder for SniDetectorCodec {
         self.emitted_sni = true;
 
         Ok(Some(SniDetectRecord::SniHostname(server_name)))
-    }
-}
-
-pub fn get_server_names<'arena>(
-    hello: &ClientHello<'arena>,
-) -> Result<&'arena ExtensionServerName<'arena>, io::Error> {
-    for ext in hello.extensions.0 {
-        match *ext {
-            Extension::ServerName(name_ext) => return Ok(name_ext),
-            Extension::Unknown(..) => (),
-        }
-    }
-    Err(io::Error::new(io::ErrorKind::Other, ALERT_INTERNAL_ERROR))
-}
-
-#[derive(Clone)]
-pub struct SocketAddrPairV4 {
-    pub local_addr: SocketAddrV4,
-    pub peer_addr: SocketAddrV4,
-}
-
-#[derive(Clone)]
-pub struct SocketAddrPairV6 {
-    pub local_addr: SocketAddrV6,
-    pub peer_addr: SocketAddrV6,
-}
-
-#[derive(Clone)]
-pub enum SocketAddrPair {
-    V4(SocketAddrPairV4),
-    V6(SocketAddrPairV6),
-}
-
-impl SocketAddrPair {
-    pub fn peer_addr(&self) -> SocketAddr {
-        match *self {
-            SocketAddrPair::V4(ref v4) => SocketAddr::V4(v4.peer_addr),
-            SocketAddrPair::V6(ref v6) => SocketAddr::V6(v6.peer_addr),
-        }
-    }
-
-    pub fn from_pair(
-        local_addr: SocketAddr,
-        peer_addr: SocketAddr,
-    ) -> Result<SocketAddrPair, io::Error> {
-        match (local_addr, peer_addr) {
-            (SocketAddr::V4(local_addr), SocketAddr::V4(peer_addr)) => {
-                Ok(SocketAddrPair::V4(SocketAddrPairV4 {
-                    local_addr,
-                    peer_addr,
-                }))
-            }
-            (SocketAddr::V6(local_addr), SocketAddr::V6(peer_addr)) => {
-                Ok(SocketAddrPair::V6(SocketAddrPairV6 {
-                    local_addr,
-                    peer_addr,
-                }))
-            }
-            _ => Err(io::Error::new(
-                io::ErrorKind::Other,
-                "address families must match",
-            )),
-        }
     }
 }
 
@@ -428,8 +342,9 @@ where
             return Err(());
         }
     };
+
     assert_eq!(bset.locations.len(), 1);
-    let backend = &bset.locations[0];
+    let backend = &bset.locations.iter().next().unwrap().1;
 
     {
         let mut sessman = sessman.lock().await;

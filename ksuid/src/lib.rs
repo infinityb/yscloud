@@ -23,8 +23,8 @@ mod base62;
 
 pub use self::base62::FmtBase62;
 
-use std::ascii::AsciiExt;
 use std::io;
+use std::fmt;
 
 use byteorder::{BigEndian, ByteOrder};
 use rand::{Rand, Rng};
@@ -254,6 +254,44 @@ impl Ksuid {
 impl Rand for Ksuid {
     fn rand<R: Rng>(rng: &mut R) -> Self {
         Self::with_payload(rng.gen())
+    }
+}
+
+impl serde::Serialize for Ksuid {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let s = self.to_base62();
+        serializer.serialize_str(&s[..])
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Ksuid {
+    fn deserialize<D>(deserializer: D) -> Result<Ksuid, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        deserializer.deserialize_i32(KsuidVisitor)
+    }
+}
+
+struct KsuidVisitor;
+
+impl<'de> serde::de::Visitor<'de> for KsuidVisitor {
+    type Value = Ksuid;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+        formatter.write_str("an string containing a Ksuid")
+    }
+
+    fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        Ksuid::from_base62(value).map_err(|e| {
+            E::custom(format!("invalid ksuid: {}", e))
+        })
     }
 }
 

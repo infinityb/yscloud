@@ -61,7 +61,7 @@ pub struct StartHandle {
 }
 
 impl BackendDialerState {
-    pub fn create_backend_key_internal(&self, key: &BackendKey) -> BackendKeyInternal {
+    fn create_backend_key_internal(&self, key: &BackendKey) -> BackendKeyInternal {
         use std::hash::{BuildHasher, Hash, Hasher};
 
         match *key {

@@ -174,3 +174,63 @@ pub fn run_reified(reified: Vec<crate::ExecSomething>) {
         std::process::exit(1);
     }
 }
+
+pub struct WaitpidStream {
+    channel: tokio::sync::mpsc::Receiver<WaitpidValue>,
+}
+
+struct WaitpidValue {
+    pid: nix::unistd::Pid,
+    exit: WaitpidExit,
+}
+
+enum WaitpidExit {
+    Exited(i32),
+    Signaled(nix::sys::signal::Signal),
+}
+
+pub fn waitpid_stream() -> WaitpidStream {
+    use tokio::runtime::current_thread::Runtime;
+    use tokio::sync::mpsc;
+    use std::thread;
+
+    let (mut tx, mut rx) = mpsc::channel(0);
+
+    std::thread::spawn(move || {
+        let mut runtime = Runtime::new().unwrap();
+        loop {
+            match waitpid(None, None) {
+                Ok(WaitStatus::Exited(pid, exit_code)) => {
+                    let res = runtime.block_on(tx.send(WaitpidValue {
+                        pid,
+                        exit: WaitpidExit::Exited(exit_code)
+                    }));
+                    if res.is_err() {
+                        // disconnected.
+                        break;
+                    }
+                }
+                Ok(WaitStatus::Signaled(pid, sig, cored)) => {
+                    let res = runtime.block_on(tx.send(WaitpidValue {
+                        pid,
+                        exit: WaitpidExit::Signaled(sig)
+                    }));
+                    if res.is_err() {
+                        // disconnected.
+                        break;
+                    }
+                }
+                Ok(ws) => {
+                    event!(Level::WARN,"waitpid got an unexpected {:?}", ws);
+                }
+                Err(err) => {
+                    panic!("waitpid err {}", err);
+                }
+            }
+        }
+    });
+
+    WaitpidStream {
+        channel: rx,
+    }
+}

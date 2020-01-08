@@ -16,7 +16,7 @@ impl DynamicSocket {
         }
     }
 
-    fn split<'a>(&'a mut self) -> (Box<dyn AsyncRead + Unpin + 'a>, Box<dyn AsyncWriteClose + Unpin + 'a>) {
+    fn split<'a>(&'a mut self) -> (Box<dyn AsyncRead + Send + Unpin + 'a>, Box<dyn AsyncWriteClose + Send + Unpin + 'a>) {
         match self.inner {
             DynamicSocketInner::Unix(ref mut uds) => {  
                 let (rh, wh) = uds.split();
@@ -52,9 +52,9 @@ impl From<TcpStream> for DynamicSocket {
 }
 
 impl<'a> Socket<'a> for DynamicSocket {
-    type ReadHalf = Box<dyn AsyncRead + Unpin + 'a>;
+    type ReadHalf = Box<dyn AsyncRead + Send + Unpin + 'a>;
 
-    type WriteHalf = Box<dyn AsyncWriteClose + Unpin + 'a>;
+    type WriteHalf = Box<dyn AsyncWriteClose + Send + Unpin + 'a>;
 
     fn shutdown_write(&self) -> Result<(), tokio::io::Error> {
         DynamicSocket::shutdown(self, std::net::Shutdown::Write)
