@@ -7,9 +7,9 @@ use std::task::{Poll, Context};
 use ppp::{model::Header, parse_v1_header, parse_v2_header};
 use bytes::{Bytes, BytesMut};
 use copy_arena::{Allocator, Arena};
-use futures::future::{self, Future};
+use futures::future::{self, Future, FutureExt};
 use futures::stream::{StreamExt};
-use log::{debug, warn};
+use log::{debug, info, warn};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
 
@@ -255,8 +255,7 @@ where
 }
 
 async fn dial_hostname(dialer_ctx: (), hostname: &str) -> io::Result<DynamicSocket> {
-    let xx = TcpStream::connect("aibi.yshi.org:443").await?;
-
+    let xx = TcpStream::connect("172.105.96.16:443").await?;
     Ok(xx.into())
 }
 
@@ -295,11 +294,42 @@ pub async fn sni_connect_and_copy(
     }
 
     let dialer_ctx = ();
-
     let mut client_to_backend_bytes: u64 = 0;
     let mut backend_to_client_bytes: u64 = 0;
-    
     let mut backend_write_buf = BytesMut::with_capacity(64 * 1024);
+
+    // let handshake_fut = async {
+    //     if let Some(haproxy_v) = client_ctx.proxy_header_version {
+    //         match read_haproxy_header(haproxy_v, &mut client, &mut backend_write_buf).await {
+    //             Ok(haproxy_header) => {
+    //                 let haproxy_header: Header = haproxy_header;
+
+    //                 //
+    //             }
+    //             Err(err) => {
+    //                 warn!("HaproxyHeader read error: {:?}", err);
+    //                 return false;
+    //             }
+    //         }
+    //     }
+
+    //     match read_client_hello_sni(&mut client, &mut backend_write_buf).await {
+    //         Ok(hostname) => sni_hostname = hostname,
+    //         Err(err) => {
+    //             warn!("ClientHello read error: {:?}", err);
+    //             return false;
+    //         }
+    //     }
+
+    //     true
+    // };
+    // if timeout(handshake_fut).await {
+    //     // replace all these with a guard?
+    //     let mut sessman = sessman.lock().await;
+    //     sessman.mark_shutdown(&session_id);
+
+    //     return Ok(())
+    // }
 
     if let Some(haproxy_v) = client_ctx.proxy_header_version {
         let res = future::select(
@@ -329,10 +359,7 @@ pub async fn sni_connect_and_copy(
                 return Ok(());
             },
         }
-
-        // Pin::new(&mut canceler).await_with(header_timeout.next())
     }
-
 
     let sni_hostname: String;
     match Pin::new(&mut canceler).await_with(timeout(client_hello_timeout, read_client_hello_sni(&mut client, &mut backend_write_buf))).await {
@@ -363,10 +390,24 @@ pub async fn sni_connect_and_copy(
             return Ok(());
         }
     };
-
     
+    {
+        let mut sessman = sessman.lock().await;
+        sessman.mark_backend_connecting(&session_id);
+    }
+
+    {
+        let mut sessman = sessman.lock().await;
+        sessman.mark_backend_resolving(&session_id, &sni_hostname);
+    }
+
     debug!("want to dial {:?}", sni_hostname);
     let mut backend = dial_hostname(dialer_ctx, &sni_hostname).await?;
+
+    {
+        let mut sessman = sessman.lock().await;
+        sessman.mark_connected(&session_id);
+    }
 
     let (mut client_read, mut client_write) = client.split();
     let (mut backend_read, mut backend_write) = backend.split();
@@ -393,8 +434,7 @@ pub async fn sni_connect_and_copy(
 
             while !to_write.is_empty() {
                 let write_fut = write_from(&mut backend_write, &mut to_write);
-                let length = canceler_check!(&mut canceler, write_fut, break 'taskloop)?;
-                drop(to_write.split_to(length));
+                let _length = canceler_check!(&mut canceler, write_fut, break 'taskloop)?;
             }
 
             let mut sessman = sessman.lock().await;
@@ -409,9 +449,10 @@ pub async fn sni_connect_and_copy(
         io::Result::Ok(())
     };
 
+    let canceler_copy = canceler.clone();
     let backend_to_client = async {
+        let mut canceler = canceler_copy;
         let mut client_write_buf = BytesMut::with_capacity(64 * 1024);
-
         'taskloop: loop {
             let read_fut = read_into(&mut backend_read, &mut client_write_buf);
             let length = canceler_check!(&mut canceler, read_fut, break 'taskloop)?;
@@ -426,28 +467,36 @@ pub async fn sni_connect_and_copy(
             while !to_write.is_empty() {
                 let write_fut = write_from(&mut client_write, &mut to_write);
                 let length = canceler_check!(&mut canceler, write_fut, break 'taskloop)?;
-
-                drop(to_write.split_to(length));
             }
 
             let mut sessman = sessman.lock().await;
             sessman.handle_xmit_backend_to_client(&session_id, length as u64);
         }
 
-        client_write.close_write()?;
-
-        let mut sessman = sessman.lock().await;
-        sessman.mark_shutdown_read(&session_id);
-
         io::Result::Ok(())
     };
-
-    let (res1, res2) = future::join(client_to_backend, backend_to_client).await;
     
-    res1?;
-    res2?;
+    let mut force_destroy = false;
+    let completion_fut = future::join(client_to_backend, backend_to_client).boxed();
+    match Pin::new(&mut canceler).await_with(completion_fut).await {
+        Ok((res1, res2)) => {
+            if let Err(err) = res1 {
+                info!("client-to-backend error: {:?}", err);
+                force_destroy = true;
+            }
+
+            if let Err(err) = res2 {
+                info!("backend-to-client error: {:?}", err);
+                force_destroy = true;
+            }
+        }
+        Err(()) => force_destroy = true,
+    }
 
     let mut sessman = sessman.lock().await;
+    if force_destroy {
+        sessman.destroy(&session_id);
+    }
     sessman.mark_shutdown(&session_id);
 
     Ok(())

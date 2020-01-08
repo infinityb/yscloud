@@ -39,7 +39,8 @@ use self::state_track::SessionManager;
 const CARGO_PKG_VERSION: &str = env!("CARGO_PKG_VERSION");
 const CARGO_PKG_NAME: &str = env!("CARGO_PKG_NAME");
 
-fn main() {
+#[tokio::main]
+async fn main() {
     let matches = App::new("sni-director")
         .version(CARGO_PKG_VERSION)
         .author("Stacey Ell <stacey.ell@gmail.com>")
@@ -145,11 +146,6 @@ fn main() {
     let sni_director_sock = sni_director_sock.expect("sni_director_sock");
     let management_sock = management_sock.expect("management_sock");
 
-    let mut data_listener: TcpListener =
-        TcpListener::from_std(sni_director_sock).unwrap();
-    let mut mgmt_listener: UnixListener =
-        UnixListener::from_std(management_sock).unwrap();
-
     let resolver_init: ResolverInit = serde_json::from_str(&extras_str).unwrap();
 
     let mut backends = BTreeMap::new();
@@ -173,6 +169,9 @@ fn main() {
     let data_sessman = sessman;
 
     let mgmt_server = async {
+        let mut mgmt_listener: UnixListener =
+            UnixListener::from_std(management_sock).unwrap();
+
         let mut mgmt_incoming = mgmt_listener.incoming();
         loop {
             let sessman = mgmt_sessman.clone();
@@ -198,6 +197,9 @@ fn main() {
     };
 
     let data_server = async {
+        let mut data_listener: TcpListener =
+            TcpListener::from_std(sni_director_sock).unwrap();
+
         let mut data_incoming = data_listener.incoming();
 
         loop {
@@ -236,7 +238,7 @@ fn main() {
             let data_sessman = Arc::clone(&data_sessman);
             let data_resolver = Arc::clone(&data_resolver);
             tokio::spawn(async move {
-                sni2::sni_connect_and_copy(
+                let res = sni2::sni_connect_and_copy(
                     data_sessman,
                     data_resolver,
                     client_conn,
@@ -245,12 +247,13 @@ fn main() {
                         proxy_header_version: None,
                     },
                 ).await;
+
+                if let Err(err) = res {
+                    warn!("error handling client: {:?}", err);
+                }
             });
         }
     };
 
-    let mut runtime_builder = tokio::runtime::Builder::new();
-    let mut runtime = runtime_builder.build().unwrap();
-
-    runtime.block_on(future::join(mgmt_server, data_server).map(|_| ()));
+    future::join(mgmt_server, data_server).await;
 }

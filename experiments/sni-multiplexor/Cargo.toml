@@ -1,6 +1,6 @@
 [package]
 name = "sni-multiplexor"
-version = "0.1.14"
+version = "0.1.16"
 authors = ["Stacey Ell <stacey.ell@gmail.com>"]
 edition = "2018"
 
