@@ -11,9 +11,8 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::Mutex;
 use log::{debug, info};
 
-use crate::resolver::BackendManager;
-use crate::resolver::{NetworkLocation, NetworkLocationAddress};
-use crate::sni_base::SocketAddrPair;
+use crate::resolver::{BackendManager};
+use crate::model::{BackendArgs, BackendArgsFlags, SocketAddrPair, HaproxyProxyHeaderVersion, NetworkLocationAddress};
 use crate::state_track::{SessionExport, SessionManager};
 use crate::ioutil::{read_into, write_from};
 
@@ -33,18 +32,6 @@ pub enum AsciiManagerRequest {
     DumpBackends,
     RemoveBackends(RemoveBackends),
     Quit,
-}
-
-#[derive(Clone, Debug)]
-pub struct BackendArgs {
-    hostname: String,
-    target_address: NetworkLocation,
-    flags: Vec<BackendArgsFlags>,
-}
-
-#[derive(Debug, Clone)]
-pub enum BackendArgsFlags {
-    UseHaproxy(i8),
 }
 
 #[derive(Debug)]
@@ -77,7 +64,7 @@ where
         recoverable: true,
         message: "replace-backend takes arguments: <hostname> <target-address> [...flags]".into(),
     })?;
-    let address: NetworkLocationAddress = parts
+    let target_address: NetworkLocationAddress = parts
         .next()
         .ok_or_else(|| MgmtProtocolError {
             recoverable: true,
@@ -91,6 +78,7 @@ where
         })?;
 
     let mut use_haproxy = None;
+
     while let Some(flag) = parts.next() {
         match flag {
             "use-haproxy-v1" => {
@@ -101,7 +89,8 @@ where
                     }
                     .into());
                 }
-                use_haproxy = Some(1);
+
+                use_haproxy = Some(HaproxyProxyHeaderVersion::Version1);
             }
             "use-haproxy-v2" => {
                 if use_haproxy.is_some() {
@@ -111,7 +100,7 @@ where
                     }
                     .into());
                 }
-                use_haproxy = Some(2);
+                use_haproxy = Some(HaproxyProxyHeaderVersion::Version2);
             }
             _ => {
                 return Err(MgmtProtocolError {
@@ -123,27 +112,15 @@ where
         }
     }
 
-    let target_address = NetworkLocation {
-        use_haproxy_header_v: match use_haproxy {
-            None => false,
-            Some(1) => true,
-            Some(2) => {
-                return Err(MgmtProtocolError {
-                    recoverable: true,
-                    message: "use-haproxy-v2 not supported yet".into(),
-                }
-                .into());
-            }
-            _ => unreachable!(),
-        },
-        address,
-        stats: (),
-    };
+    let mut flags = Vec::new();
+    if let Some(hv) = use_haproxy {
+        flags.push(BackendArgsFlags::UseHaproxy(hv));
+    }
 
     Ok(BackendArgs {
         hostname: hostname.into(),
         target_address,
-        flags: Vec::new(),
+        flags,
     })
 }
 
@@ -202,16 +179,20 @@ impl FromStr for AsciiManagerRequest {
             "print-active-sessions" => Ok(AsciiManagerRequest::PrintActiveSessions),
             "dump-backends" => Ok(AsciiManagerRequest::DumpBackends),
             "destroy-session" => {
-                destroy_session_from_str_iter(parts).map(AsciiManagerRequest::DestroySession)
+                destroy_session_from_str_iter(parts)
+                    .map(AsciiManagerRequest::DestroySession)
             }
             "replace-backend" => {
-                backend_args_from_str_iter(parts).map(AsciiManagerRequest::ReplaceBackend)
+                backend_args_from_str_iter(parts)
+                    .map(AsciiManagerRequest::ReplaceBackend)
             }
             "add-held-backend" => {
-                backend_args_from_str_iter(parts).map(AsciiManagerRequest::AddHeldBackend)
+                backend_args_from_str_iter(parts)
+                    .map(AsciiManagerRequest::AddHeldBackend)
             }
             "remove-backends" => {
-                remove_backends_from_str_iter(parts).map(AsciiManagerRequest::RemoveBackends)
+                remove_backends_from_str_iter(parts)
+                    .map(AsciiManagerRequest::RemoveBackends)
             }
             "quit" => Ok(AsciiManagerRequest::Quit),
             _ => Err(MgmtProtocolError {
@@ -436,13 +417,19 @@ async fn handle_query(
         }
         AsciiManagerRequest::AddHeldBackend(repl) => {
             let mut backends = backend_man.lock().await;
-            let bid = backends.add_backend(&repl.hostname, repl.target_address);
-            held_backends.insert((repl.hostname, bid));
-            Ok(AsciiManagerResponse::GenericOk)
+            match backends.add_backend(&repl) {
+                Ok(bid) => {
+                    held_backends.insert((repl.hostname, bid));
+                    Ok(AsciiManagerResponse::GenericOk)
+                }
+                Err(err) => {
+                    Ok(AsciiManagerResponse::GenericError(format!("{:?}", err).into()))
+                }
+            }
         }
         AsciiManagerRequest::ReplaceBackend(repl) => {
             let mut backends = backend_man.lock().await;
-            backends.replace_backend(&repl.hostname, repl.target_address);
+            backends.replace_backend(&repl);
             Ok(AsciiManagerResponse::GenericOk)
         }
         AsciiManagerRequest::RemoveBackends(remo) => {

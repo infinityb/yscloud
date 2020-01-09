@@ -1,21 +1,25 @@
 use std::collections::{btree_map, BTreeMap};
 use std::future::Future;
-use std::io;
-use std::net::SocketAddr;
-use std::path::PathBuf;
 use std::sync::Arc;
+use std::str::FromStr;
 
 use log::info;
 use futures::future;
-use rand::seq::SliceRandom;
 use serde::{Deserialize, Serialize};
 use ksuid::Ksuid;
+use failure::{Error, Fail};
+use rand::thread_rng;
 
-
-use crate::sni_base::ALERT_UNRECOGNIZED_NAME;
+use crate::model::{
+    HaproxyProxyHeaderVersion,
+    BackendArgs,
+    BackendArgsFlags,
+    NetworkLocationAddress,
+};
+use crate::error::tls::ALERT_UNRECOGNIZED_NAME;
 
 pub trait Resolver2 {
-    type ResolveFuture: Future<Output = io::Result<BackendSet>>;
+    type ResolveFuture: Future<Output = Result<BackendSet, Error>>;
 
     fn resolve(&self, hostname: &str) -> Self::ResolveFuture;
 }
@@ -26,81 +30,62 @@ pub struct BackendManager {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct NetworkLocation {
-    pub use_haproxy_header_v: bool,
-    pub address: NetworkLocationAddress,
-    pub stats: (),
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-#[serde(rename_all = "snake_case")]
-pub enum NetworkLocationAddress {
-    Unix(PathBuf),
-    Tcp(SocketAddr),
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "snake_case")]
 pub struct BackendSet {
-    pub locations: BTreeMap<Ksuid, NetworkLocation>,
+    // #[serde(with="crate::helpers::haproxy_proxy_header_version")]
+    pub haproxy_header_version: Option<HaproxyProxyHeaderVersion>,
+    pub haproxy_header_allow_passthrough: bool,
+    pub locations: BTreeMap<Ksuid, NetworkLocationAddress>,
 }
 
-impl BackendSet {
-    pub fn from_list(loc_list: Vec<NetworkLocation>) -> BackendSet {
-        let mut locations = BTreeMap::new();
 
-        for v in loc_list {
-            locations.insert(Ksuid::generate(), v);
-        }
-
-        BackendSet { locations }
-    }
-}
-
-// #[derive(Serialize, Deserialize, Debug, Clone)]
-// #[serde(rename_all = "snake_case")]
-// pub struct ConnStats {
-//     //
-// }
-
-impl std::str::FromStr for NetworkLocationAddress {
-    type Err = Box<dyn std::error::Error>;
-
-    fn from_str(from: &str) -> Result<Self, Self::Err> {
-        // FIXME: only handle unix paths for now.
-        Ok(NetworkLocationAddress::Unix(PathBuf::from(from)))
-    }
-}
-
-impl NetworkLocation {
-    pub fn use_haproxy_header(&self) -> bool {
-        self.use_haproxy_header_v
-    }
-}
+#[derive(Debug, Fail)]
+#[fail(display = "haproxy header version must match other backends")]
+struct HaproxyProxyHeaderVersionMismatch;
 
 impl BackendManager {
-    pub fn add_backend(&mut self, hostname: &str, nl: NetworkLocation) -> Ksuid {
+    pub fn add_backend(&mut self, args: &BackendArgs) -> Result<Ksuid, Error> {
         let mut backends = BTreeMap::clone(&*self.backends);
 
-        info!("adding {} backend with: {:?}", hostname, nl);
-        let backend_id = Ksuid::generate();
+        let mut haproxy_header_version = None;
+        for flag in &args.flags {
+            match *flag {
+                BackendArgsFlags::UseHaproxy(v) => {
+                    if haproxy_header_version.is_some() {
+                        return Err(failure::format_err!("duplicate haproxy version argument"));
+                    }
+                    haproxy_header_version = Some(v);
+                }
+            }
+        }
 
-        match backends.entry(hostname.to_string()) {
+        let backend_id = Ksuid::generate();
+        let nla = args.target_address.clone();
+
+        match backends.entry(args.hostname.clone()) {
             btree_map::Entry::Occupied(mut occ) => {
                 let backend_set = occ.get_mut();
-                backend_set.locations.insert(backend_id, nl);
-                println!("backends: {:#?}", backend_set.locations);
+
+                if backend_set.haproxy_header_version != haproxy_header_version {
+                    return Err(HaproxyProxyHeaderVersionMismatch.into());
+                }
+
+                backend_set.locations.insert(backend_id, nla);
             }
             btree_map::Entry::Vacant(vac) => {
                 let mut locations = BTreeMap::new();
-                locations.insert(backend_id, nl);
-                vac.insert(BackendSet { locations });
+                locations.insert(backend_id, nla);
+                vac.insert(BackendSet {
+                    haproxy_header_version,
+                    haproxy_header_allow_passthrough: false,
+                    locations: locations,
+                });
             }
         }
 
         self.backends = Arc::new(backends);
 
-        backend_id
+        Ok(backend_id)
     }
 
     pub fn remove_backend(&mut self, hostname: &str, nl: Ksuid) {
@@ -123,16 +108,45 @@ impl BackendManager {
         self.backends = Arc::new(backends);
     }
 
-    pub fn replace_backend(&mut self, hostname: &str, nl: NetworkLocation) {
+    pub fn replace_backend(&mut self, args: &BackendArgs) -> Result<Ksuid, Error> {
         let mut backends = BTreeMap::clone(&*self.backends);
 
-        info!("replacing {} backend with: {:?}", hostname, nl);
+        let mut haproxy_header_version = None;
+        for flag in &args.flags {
+            match *flag {
+                BackendArgsFlags::UseHaproxy(v) => {
+                    if haproxy_header_version.is_some() {
+                        return Err(failure::format_err!("duplicate haproxy version argument"));
+                    }
+                    haproxy_header_version = Some(v);
+                }
+            }
+        }
 
-        backends.insert(
-            hostname.to_string(),
-            BackendSet::from_list(vec![nl]),
-        );
+        let backend_id = Ksuid::generate();
+        let nla = args.target_address.clone();
+
+        match backends.entry(args.hostname.clone()) {
+            btree_map::Entry::Occupied(mut occ) => {
+                let backend_set = occ.get_mut();
+                backend_set.haproxy_header_version = haproxy_header_version;
+                backend_set.locations.clear();
+                backend_set.locations.insert(backend_id, nla);
+            }
+            btree_map::Entry::Vacant(vac) => {
+                let mut locations = BTreeMap::new();
+                locations.insert(backend_id, nla);
+                vac.insert(BackendSet {
+                    haproxy_header_version,
+                    haproxy_header_allow_passthrough: false,
+                    locations,
+                });
+            }
+        }
+
         self.backends = Arc::new(backends);
+
+        Ok(backend_id)
     }
 
     pub fn remove_backends(&mut self, hostname: &str) {
@@ -142,18 +156,18 @@ impl BackendManager {
     }
 
 
-    fn sync_resolve(&self, hostname: &str) -> io::Result<BackendSet> {
+    fn sync_resolve(&self, hostname: &str) -> Result<BackendSet, Error> {
         let backend_set = self
             .backends
             .get(hostname)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::Other, ALERT_UNRECOGNIZED_NAME))?;
+            .ok_or(ALERT_UNRECOGNIZED_NAME)?;
 
         Ok(backend_set_prune(backend_set))
     }
 }
 
 impl Resolver2 for BackendManager {
-    type ResolveFuture = future::Ready<io::Result<BackendSet>>;
+    type ResolveFuture = future::Ready<Result<BackendSet, Error>>;
 
     fn resolve(&self, hostname: &str) -> Self::ResolveFuture {
         future::ready(self.sync_resolve(hostname))
@@ -161,7 +175,19 @@ impl Resolver2 for BackendManager {
 }
 
 fn backend_set_prune(bs: &BackendSet) -> BackendSet {
-    let mut rng = &mut rand::thread_rng();
-    let vv: Vec<_> = bs.locations.iter().map(|v| v.1.clone()).collect();
-    BackendSet::from_list(vv.choose_multiple(&mut rng, 1).cloned().collect())
+    use rand::seq::SliceRandom;
+
+    let mut rng = thread_rng();
+
+    let vv: Vec<(&Ksuid, &NetworkLocationAddress)> = bs.locations.iter().collect();
+    let reduced_locations: BTreeMap<Ksuid, NetworkLocationAddress> = vv
+        .choose_multiple(&mut rng, 1)
+        .map(|(k, v)| (Clone::clone(*k), Clone::clone(*v)))
+        .collect();
+
+    BackendSet {
+        haproxy_header_version: bs.haproxy_header_version,
+        haproxy_header_allow_passthrough: bs.haproxy_header_allow_passthrough,
+        locations: reduced_locations,
+    }
 }

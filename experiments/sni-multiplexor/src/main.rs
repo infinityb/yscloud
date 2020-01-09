@@ -6,7 +6,7 @@ use std::os::unix::net::UnixListener as StdUnixListener;
 use std::sync::Arc;
 
 use clap::{App, Arg};
-use futures::future::{self, FutureExt};
+use futures::future;
 use futures::stream::StreamExt;
 use log::warn;
 use log::LevelFilter;
@@ -16,24 +16,23 @@ use tokio::net::UnixListener;
 use tokio::sync::Mutex;
 use yscloud_config_model::AppConfiguration;
 
-// mod abortable_stream;
-mod config;
 mod context;
 mod dialer;
 mod erased;
-mod ioutil;
 mod mgmt_proto;
-mod resolver2;
+// mod resolver2;
 mod resolver;
 mod sni2;
-// mod sni;
 mod sni_base;
 mod state_track;
+mod helpers;
+mod model;
+mod error;
+mod ioutil;
 
-use self::config::ResolverInit;
+use self::model::{config::ConfigResolverInit, SocketAddrPair, ClientCtx};
 use self::mgmt_proto::{start_management_client};
-use self::resolver::{NetworkLocation, BackendManager, BackendSet};
-use self::sni_base::SocketAddrPair;
+use self::resolver::{BackendManager};
 use self::state_track::SessionManager;
 
 const CARGO_PKG_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -146,18 +145,11 @@ async fn main() {
     let sni_director_sock = sni_director_sock.expect("sni_director_sock");
     let management_sock = management_sock.expect("management_sock");
 
-    let resolver_init: ResolverInit = serde_json::from_str(&extras_str).unwrap();
+    let resolver_init: ConfigResolverInit = serde_json::from_str(&extras_str).unwrap();
 
     let mut backends = BTreeMap::new();
     for (k, v) in resolver_init.hostnames.into_iter() {
-        backends.insert(
-            k,
-            BackendSet::from_list(vec![NetworkLocation {
-                use_haproxy_header_v: v.use_haproxy_header,
-                address: v.location,
-                stats: (),
-            }]),
-        );
+        backends.insert(k, v.into());
     }
 
     let resolver = Arc::new(Mutex::new(BackendManager { backends: Arc::new(backends) }));
@@ -243,7 +235,7 @@ async fn main() {
                     data_resolver,
                     client_conn,
                     socket,
-                    sni2::ClientCtx {
+                    ClientCtx {
                         proxy_header_version: None,
                     },
                 ).await;

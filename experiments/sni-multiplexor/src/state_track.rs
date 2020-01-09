@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use ksuid::Ksuid;
 
-use crate::sni_base::SocketAddrPair;
+use crate::model::SocketAddrPair;
 use crate::context;
 
 

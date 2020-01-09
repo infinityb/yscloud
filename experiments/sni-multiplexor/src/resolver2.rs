@@ -125,12 +125,6 @@ enum BackendAddress {
     TcpV6(Ipv6Addr),
 }
 
-#[derive(Copy, Clone)]
-pub enum HaproxyProxyVersion {
-    Version1,
-    Version2,
-}
-
 struct BackendAddressResolvableHostname {
     hostname: String,
     mode: BackendAddressResolvableHostnameMode,
@@ -237,7 +231,6 @@ fn synchronous_in_memory_resolver() {
         next_allowed_attempt: Instant::now() + Duration::new(1, 0),
         ..Default::default()
     }));
-
 
     backend_manager_lookup_best_backends(
         &backend_paths[..],
