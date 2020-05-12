@@ -1,16 +1,15 @@
-use std::io::{self, Read, Write, IoSlice, IoSliceMut};
-use std::task::{Context, Poll};
-use std::pin::Pin;
-use std::os::unix::io::AsRawFd;
+use std::io::{self, IoSlice, IoSliceMut, Read, Write};
 use std::mem::MaybeUninit;
-
+use std::os::unix::io::AsRawFd;
+use std::pin::Pin;
+use std::task::{Context, Poll};
 
 use bytes::buf::{Buf, BufMut};
 use mio::unix::EventedFd;
-use mio::{IoVec, Token, PollOpt, Poll as MioPoll, Ready as MioReady};
+use mio::{IoVec, Poll as MioPoll, PollOpt, Ready as MioReady, Token};
 use socket2::Socket;
-use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::io::PollEvented;
+use tokio::io::{AsyncRead, AsyncWrite};
 
 macro_rules! ready {
     ($e:expr $(,)?) => {
@@ -48,16 +47,24 @@ impl io::Write for StreamSocketInner {
 }
 
 impl mio::event::Evented for StreamSocketInner {
-    fn register(&self, poll: &MioPoll, token: Token, interest: MioReady, opts: PollOpt)
-        -> io::Result<()>
-    {
+    fn register(
+        &self,
+        poll: &MioPoll,
+        token: Token,
+        interest: MioReady,
+        opts: PollOpt,
+    ) -> io::Result<()> {
         let raw_fd = self.0.as_raw_fd();
         EventedFd(&raw_fd).register(poll, token, interest, opts)
     }
 
-    fn reregister(&self, poll: &MioPoll, token: Token, interest: MioReady, opts: PollOpt)
-        -> io::Result<()>
-    {
+    fn reregister(
+        &self,
+        poll: &MioPoll,
+        token: Token,
+        interest: MioReady,
+        opts: PollOpt,
+    ) -> io::Result<()> {
         let raw_fd = self.0.as_raw_fd();
         EventedFd(&raw_fd).reregister(poll, token, interest, opts)
     }
@@ -84,11 +91,7 @@ impl StreamSocket {
     // of view, it will result in unexpected behavior in the form of lost
     // notifications and tasks hanging.
 
-    fn poll_read_priv(
-        &self,
-        cx: &mut Context<'_>,
-        buf: &mut [u8],
-    ) -> Poll<io::Result<usize>> {
+    fn poll_read_priv(&self, cx: &mut Context<'_>, buf: &mut [u8]) -> Poll<io::Result<usize>> {
         ready!(self.io.poll_read_ready(cx, mio::Ready::readable()))?;
 
         match self.io.get_mut().0.read(buf) {
@@ -164,11 +167,7 @@ impl StreamSocket {
         }
     }
 
-    fn poll_write_priv(
-        &self,
-        cx: &mut Context<'_>,
-        buf: &[u8],
-    ) -> Poll<io::Result<usize>> {
+    fn poll_write_priv(&self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
         ready!(self.io.poll_write_ready(cx))?;
 
         match self.io.get_mut().write(buf) {

@@ -1,8 +1,8 @@
 use tokio::io::AsyncRead;
-use tokio::net::UnixStream;
 use tokio::net::TcpStream;
+use tokio::net::UnixStream;
 
-use super::{Socket, AsyncWriteClose};
+use super::{AsyncWriteClose, Socket};
 
 pub struct DynamicSocket {
     inner: DynamicSocketInner,
@@ -16,9 +16,14 @@ impl DynamicSocket {
         }
     }
 
-    fn split<'a>(&'a mut self) -> (Box<dyn AsyncRead + Send + Unpin + 'a>, Box<dyn AsyncWriteClose + Send + Unpin + 'a>) {
+    fn split<'a>(
+        &'a mut self,
+    ) -> (
+        Box<dyn AsyncRead + Send + Unpin + 'a>,
+        Box<dyn AsyncWriteClose + Send + Unpin + 'a>,
+    ) {
         match self.inner {
-            DynamicSocketInner::Unix(ref mut uds) => {  
+            DynamicSocketInner::Unix(ref mut uds) => {
                 let (rh, wh) = uds.split();
                 (Box::new(rh), Box::new(wh))
             }
@@ -32,13 +37,13 @@ impl DynamicSocket {
 
 enum DynamicSocketInner {
     Unix(UnixStream),
-    Tcp(TcpStream)
+    Tcp(TcpStream),
 }
 
 impl From<UnixStream> for DynamicSocket {
     fn from(uds: UnixStream) -> DynamicSocket {
         DynamicSocket {
-            inner: DynamicSocketInner::Unix(uds)
+            inner: DynamicSocketInner::Unix(uds),
         }
     }
 }
@@ -46,7 +51,7 @@ impl From<UnixStream> for DynamicSocket {
 impl From<TcpStream> for DynamicSocket {
     fn from(tcp: TcpStream) -> DynamicSocket {
         DynamicSocket {
-            inner: DynamicSocketInner::Tcp(tcp)
+            inner: DynamicSocketInner::Tcp(tcp),
         }
     }
 }

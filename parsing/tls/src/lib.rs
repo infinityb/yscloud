@@ -431,9 +431,10 @@ pub fn extract_record<'de>(data: &mut slice::Iter<'de, u8>) -> Result<Option<Rec
     }))
 }
 
-pub fn decode_client_hello<'arena>(mut allocator: &mut Allocator<'arena>, data: &[u8])
-    -> Result<ClientHello<'arena>, Error>
-{
+pub fn decode_client_hello<'arena>(
+    mut allocator: &mut Allocator<'arena>,
+    data: &[u8],
+) -> Result<ClientHello<'arena>, Error> {
     let mut data_size = 0;
     let mut data_iter = data.iter();
     while let Some(record) = extract_record(&mut data_iter)? {
@@ -457,10 +458,12 @@ pub fn decode_client_hello<'arena>(mut allocator: &mut Allocator<'arena>, data: 
         unframed_data_write = rest;
     }
     assert_eq!(unframed_data_write.len(), 0);
-    
+
     match Handshake::read_byte_iter(&mut allocator, &mut unframed_data.iter())? {
         Handshake::ClientHello(hello) => Ok(*hello),
-        Handshake::Unknown(..) => Err(Error { kind: ErrorKind::Other }),
+        Handshake::Unknown(..) => Err(Error {
+            kind: ErrorKind::Other,
+        }),
     }
 }
 

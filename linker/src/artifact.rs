@@ -2,7 +2,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use semver::Version;
-use tracing::{Level, span, event};
+use tracing::{event, span, Level};
 
 use super::platform::{self, Executable};
 
@@ -16,7 +16,7 @@ pub fn direct_load_artifact(path: &str) -> io::Result<Executable> {
     let pb: PathBuf = Path::new(path).into();
 
     if let Ok(aref) = Executable::open(pb) {
-        event!(Level::DEBUG, found_artifact=true);
+        event!(Level::DEBUG, found_artifact = true);
         return Ok(aref);
     }
 
@@ -49,7 +49,7 @@ impl<'a> DiskArtifactLoader<'a> {
             event!(Level::DEBUG, search_path = ?pb.display());
 
             if let Ok(aref) = Executable::open(pb) {
-                event!(Level::DEBUG, found_artifact=true);
+                event!(Level::DEBUG, found_artifact = true);
 
                 return Ok(aref);
             }

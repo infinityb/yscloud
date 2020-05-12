@@ -1,5 +1,5 @@
 use std::error::Error as StdError;
-use std::ffi::CString;
+use std::ffi::{CStr, CString};
 use std::fmt;
 use std::io;
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
@@ -8,11 +8,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use digest::FixedOutput;
-use log::{debug, info, warn};
-use nix::fcntl::{open, OFlag, fcntl};
+use nix::fcntl::{fcntl, open, OFlag};
 use nix::sys::stat::Mode;
 use nix::unistd::{execveat, fork, lseek64, write, ForkResult, Gid, Pid, Uid, Whence};
 use sha2::Sha256;
+use tracing::{event, Level};
 use users::{get_group_by_name, get_user_by_name};
 
 use super::posix_imp::relabel_file_descriptors;
@@ -80,7 +80,12 @@ impl ExecutableFactory {
 
         let got_sha = crate::util::hexify(&mut scratch[..], &sha_result[..]).unwrap();
 
-        debug!("checking sha: expecting: {}, got: {}", expect_sha, got_sha);
+        event!(
+            Level::DEBUG,
+            "checking sha: expecting: {}, got: {}",
+            expect_sha,
+            got_sha
+        );
         if expect_sha != got_sha {
             let msg = format!("sha mismatch {} != {}", expect_sha, got_sha);
             return Err(io::Error::new(io::ErrorKind::Other, msg));
@@ -122,15 +127,21 @@ impl Executable {
         Ok(Executable(unsafe { OwnedFd::from_raw_fd(artifact_file) }))
     }
 
-    pub fn execute(&self, arguments: &[CString], env: &[CString]) -> io::Result<Void> {
-        use nix::fcntl::{fcntl, FcntlArg, FdFlag, AtFlags};
+    pub fn execute(&self, arguments: &[&CStr], env: &[&CStr]) -> io::Result<Void> {
+        use nix::fcntl::{AtFlags, FcntlArg, FdFlag};
 
         fcntl(self.0.as_raw_fd(), FcntlArg::F_SETFD(FdFlag::FD_CLOEXEC))
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
 
         let program_name = CString::new("").unwrap();
-        execveat(self.0.as_raw_fd(), &program_name, arguments, env, AtFlags::AT_EMPTY_PATH)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        execveat(
+            self.0.as_raw_fd(),
+            &program_name,
+            arguments,
+            env,
+            AtFlags::AT_EMPTY_PATH,
+        )
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
 
         // successful invokations of execveat don't return.
         unreachable!();
@@ -183,15 +194,15 @@ impl SandboxingStrategy for UserChangeStrategy {
         }
 
         if let Some(gid) = self.set_group {
-            info!("setting gid = {:?}", gid);
+            event!(Level::INFO, "setting gid = {:?}", gid);
             nix::unistd::setgid(gid).map_err(io_other)?;
         }
         if let Some(uid) = self.set_user {
-            info!("setting uid = {:?}", uid);
+            event!(Level::INFO, "setting uid = {:?}", uid);
             nix::unistd::setuid(uid).map_err(io_other)?;
         }
         if let Some(ref wd) = self.workdir {
-            info!("setting cwd = {}", wd.display());
+            event!(Level::INFO, "setting cwd = {}", wd.display());
             nix::unistd::chdir(wd).map_err(io_other)?;
         }
 
@@ -270,7 +281,7 @@ fn exec_artifact_child(ext: &ExecExtras, c: &AppPreforkConfiguration) -> io::Res
         Mode::S_IRUSR | Mode::S_IWUSR,
     )
     .map_err(|e| {
-        warn!("error opening temporary: {:?}", e);
+        event!(Level::WARN, "error opening temporary: {:?}", e);
         io_other(e)
     })?;
 
@@ -282,19 +293,26 @@ fn exec_artifact_child(ext: &ExecExtras, c: &AppPreforkConfiguration) -> io::Res
         .map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
 
     assert_eq!(data_len, data.len());
-    let arguments = &[
-        CString::new("yscloud-executable").unwrap(),
-        CString::new("--config-fd").unwrap(),
-        CString::new(format!("{}", tmpfile)).unwrap(),
+    let tmpfile = format!("{}\0", tmpfile);
+    let arguments: &[&CStr] = &[
+        CStr::from_bytes_with_nul(b"yscloud-executable\0").unwrap(),
+        CStr::from_bytes_with_nul(b"--config-fd\0").unwrap(),
+        CStr::from_bytes_with_nul(tmpfile.as_bytes()).unwrap(),
     ];
-    info!("running {} {:?} -- {}", package_id, arguments, data);
+    event!(
+        Level::INFO,
+        "running {} {:?} -- {}",
+        package_id,
+        arguments,
+        data
+    );
 
     if let Some(ref sandbox) = ext.sandboxing_strategy {
         sandbox.preexec()?;
     }
-    let env = &[
-        CString::new("RUST_BACKTRACE=1").unwrap(),
-        CString::new("YSCLOUD=1").unwrap(),
+    let env: &[&CStr] = &[
+        CStr::from_bytes_with_nul(b"RUST_BACKTRACE=1\0").unwrap(),
+        CStr::from_bytes_with_nul(b"YSCLOUD=1\0").unwrap(),
     ];
     c.artifact.execute(arguments, env)?;
 
@@ -305,7 +323,7 @@ pub fn exec_artifact(e: &ExecExtras, c: AppPreforkConfiguration) -> io::Result<P
     match fork() {
         Ok(ForkResult::Child) => {
             if let Err(err) = exec_artifact_child(e, &c) {
-                warn!("failed to execute: {:?}", err);
+                event!(Level::WARN, "failed to execute: {:?}", err);
                 std::process::exit(1);
             } else {
                 unreachable!();

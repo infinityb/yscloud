@@ -1,15 +1,18 @@
+use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
 use std::fs::File;
-use std::path::PathBuf;
-use std::collections::{BTreeMap, VecDeque};
 use std::io;
+use std::path::PathBuf;
 
 use clap::{App, Arg, SubCommand};
-use log::trace;
-use yscloud_config_model::{RegistryEntry, ArtifactHashSet, Sandbox, DeployedPublicService, DeployedApplicationManifest, ServiceId, DeploymentManifest, ApplicationDeploymentTemplate};
 use failure::{Fail, Fallible};
 use serde_json::{json, Value};
-use tokio::runtime::current_thread::Runtime;
+use tokio::runtime;
+use tracing::{event, Level};
+use yscloud_config_model::{
+    ApplicationDeploymentTemplate, ArtifactHashSet, DeployedApplicationManifest,
+    DeployedPublicService, DeploymentManifest, RegistryEntry, Sandbox, ServiceId,
+};
 
 use super::common;
 use crate::registry::{FileRegistry, Registry, RegistryShared};
@@ -44,7 +47,7 @@ pub fn main(matches: &clap::ArgMatches) {
     let registry_path = PathBuf::from(matches.value_of_os("registry").unwrap());
 
     let deployment_name = matches.value_of("deployment-name").unwrap();
-    trace!("got deployment name: {:?}", deployment_name);
+    event!(Level::TRACE, "got deployment name: {:?}", deployment_name);
 
     let deployment_tpl_path = PathBuf::from(matches.value_of_os("deployment-template").unwrap());
 
@@ -52,8 +55,9 @@ pub fn main(matches: &clap::ArgMatches) {
     let ad: ApplicationDeploymentTemplate = serde_json::from_reader(&mut rdr).unwrap();
 
     let registry = RegistryShared::shared(FileRegistry::new(&registry_path));
-    
-    let mut rt = Runtime::new().unwrap();
+
+    let mut rt = runtime::Builder::new().basic_scheduler().build().unwrap();
+
     let resolved = rt.block_on(resolve(&registry, &ad)).unwrap();
 
     let stdout = io::stdout();
@@ -71,8 +75,10 @@ impl fmt::Display for MissingServiceName {
     }
 }
 
-
-async fn resolve(reg: &RegistryShared, template: &ApplicationDeploymentTemplate) -> Fallible<DeploymentManifest> {
+async fn resolve(
+    reg: &RegistryShared,
+    template: &ApplicationDeploymentTemplate,
+) -> Fallible<DeploymentManifest> {
     let mut out = DeploymentManifest {
         tenant_id: template.tenant_id.clone(),
         deployment_name: template.deployment_name.clone(),
@@ -85,8 +91,12 @@ async fn resolve(reg: &RegistryShared, template: &ApplicationDeploymentTemplate)
     let mut resolved_local_services = BTreeMap::new();
 
     for ps in &template.public_services {
-        let impl_req = template.service_implementations.get(&ps.service_name)
-            .ok_or_else(|| MissingServiceName { service_name: ps.service_name.clone() })?;
+        let impl_req = template
+            .service_implementations
+            .get(&ps.service_name)
+            .ok_or_else(|| MissingServiceName {
+                service_name: ps.service_name.clone(),
+            })?;
 
         unresolved_local_services.push_back(ps.service_name.clone());
         out.public_services.push(DeployedPublicService {
@@ -103,11 +113,17 @@ async fn resolve(reg: &RegistryShared, template: &ApplicationDeploymentTemplate)
             continue;
         }
 
-        let impl_req = template.service_implementations.get(&ps)
-            .ok_or_else(|| MissingServiceName { service_name: ps.clone() })?;
+        let impl_req =
+            template
+                .service_implementations
+                .get(&ps)
+                .ok_or_else(|| MissingServiceName {
+                    service_name: ps.clone(),
+                })?;
 
-        let found: RegistryEntry = reg.find_best_entry_for_version(
-            &impl_req.package_id, &impl_req.version_req).await?;
+        let found: RegistryEntry = reg
+            .find_best_entry_for_version(&impl_req.package_id, &impl_req.version_req)
+            .await?;
 
         for rls in &found.manifest.required_local_services {
             unresolved_local_services.push_back(rls.clone());
@@ -116,45 +132,61 @@ async fn resolve(reg: &RegistryShared, template: &ApplicationDeploymentTemplate)
         let mut required_local_services = Vec::new();
 
         for rls in &found.manifest.required_local_services {
-            let service_impl = template.service_implementations.get(rls)
-                .ok_or_else(|| MissingServiceName { service_name: ps.clone() })?;
-            
+            let service_impl =
+                template
+                    .service_implementations
+                    .get(rls)
+                    .ok_or_else(|| MissingServiceName {
+                        service_name: ps.clone(),
+                    })?;
+
             required_local_services.push(ServiceId {
                 package_id: service_impl.package_id.clone(),
                 service_name: rls.clone(),
             });
         }
 
-        let extras: Value = template.configuration.get(&impl_req.package_id)
+        let extras: Value = template
+            .configuration
+            .get(&impl_req.package_id)
             .map(|x| x.clone())
             .unwrap_or_else(|| json!({}));
 
-        let sandbox = template.sandbox.get(&impl_req.package_id)
+        let sandbox = template
+            .sandbox
+            .get(&impl_req.package_id)
             .cloned()
             .unwrap_or(Sandbox::Unconfined);
 
         let mut artifacts = BTreeMap::new();
         for (trip, sha256) in &found.sha256s {
-            artifacts.insert(trip.clone(), ArtifactHashSet {
-                content_length: None,
-                sha256: sha256.clone(),
-            });
+            artifacts.insert(
+                trip.clone(),
+                ArtifactHashSet {
+                    content_length: None,
+                    sha256: sha256.clone(),
+                },
+            );
         }
 
-        resolved_local_services.insert(ps, DeployedApplicationManifest {
-            package_id: impl_req.package_id.clone(),
-            version: found.version,
-            provided_local_services: found.manifest.provided_local_services,
-            provided_remote_services: found.manifest.provided_remote_services,
-            required_local_services,
-            required_remote_services: found.manifest.required_remote_services,
-            sandbox,
-            extras,
-            artifacts,
-        });
+        resolved_local_services.insert(
+            ps,
+            DeployedApplicationManifest {
+                package_id: impl_req.package_id.clone(),
+                version: found.version,
+                provided_local_services: found.manifest.provided_local_services,
+                provided_remote_services: found.manifest.provided_remote_services,
+                required_local_services,
+                required_remote_services: found.manifest.required_remote_services,
+                sandbox,
+                extras,
+                artifacts,
+            },
+        );
     }
 
-    out.components.extend(resolved_local_services.into_iter().map(|(_, v)| v));
+    out.components
+        .extend(resolved_local_services.into_iter().map(|(_, v)| v));
 
     Ok(out)
 }
@@ -166,31 +198,21 @@ mod tests {
     fn test_staticserver_simple() {
         use std::collections::BTreeMap;
 
-        use tokio::runtime::current_thread::Runtime;
         use semver::{Version, VersionReq};
+        use tokio::runtime::current_thread::Runtime;
 
         use yscloud_config_model::{
-            permissions,
-            ApplicationDeploymentRequirement,
-            ApplicationDeploymentTemplate,
-            ApplicationManifest,
-            DeploymentManifest,
-            NativePortBinder,
-            PublicService,
-            PublicServiceBinder,
-            RegistryEntry,
-            Sandbox,
-            SocketFlag,
+            permissions, ApplicationDeploymentRequirement, ApplicationDeploymentTemplate,
+            ApplicationManifest, DeploymentManifest, NativePortBinder, PublicService,
+            PublicServiceBinder, RegistryEntry, Sandbox, SocketFlag,
         };
 
-        use crate::registry::{MemRegistry, RegistryShared};
         use super::resolve;
+        use crate::registry::{MemRegistry, RegistryShared};
 
         let file_logger_manifest = ApplicationManifest {
             provided_remote_services: Vec::new(),
-            provided_local_services: vec![
-                "org.yshi.log_target.v1.LogTarget".to_string(),
-            ],
+            provided_local_services: vec!["org.yshi.log_target.v1.LogTarget".to_string()],
             required_remote_services: Vec::new(),
             required_local_services: Vec::new(),
             permissions: vec![permissions::UNCONSTRAINED],
@@ -200,103 +222,124 @@ mod tests {
             provided_remote_services: vec!["org.yshi.staticserver.http".to_string()],
             provided_local_services: Vec::new(),
             required_remote_services: Vec::new(),
-            required_local_services: vec![
-                "org.yshi.log_target.v1.LogTarget".to_string(),
-            ],
+            required_local_services: vec!["org.yshi.log_target.v1.LogTarget".to_string()],
             permissions: vec![permissions::UNCONSTRAINED],
         };
 
         let mut registry = MemRegistry::default();
-        registry.add_package("org.yshi.staticserver", RegistryEntry {
-            version: Version::parse("1.0.5").unwrap(),
-            sha256s: Default::default(),
-            manifest: staticserver_manifest,
-        });
-        registry.add_package("org.yshi.file-logger", RegistryEntry {
-            version: Version::parse("1.0.0").unwrap(),
-            sha256s: Default::default(),
-            manifest: file_logger_manifest.clone(),
-        });
-        registry.add_package("org.yshi.file-logger", RegistryEntry {
-            version: Version::parse("1.0.1").unwrap(),
-            sha256s: Default::default(),
-            manifest: file_logger_manifest.clone(),
-        });
-        registry.add_package("org.yshi.file-logger", RegistryEntry {
-            version: Version::parse("1.0.2").unwrap(),
-            sha256s: Default::default(),
-            manifest: file_logger_manifest.clone(),
-        });
-        registry.add_package("org.yshi.file-logger", RegistryEntry {
-            version: Version::parse("2.0.0-alpha1").unwrap(),
-            sha256s: Default::default(),
-            manifest: file_logger_manifest.clone(),
-        });
-        registry.add_package("org.yshi.file-logger", RegistryEntry {
-            version: Version::parse("2.0.0").unwrap(),
-            sha256s: Default::default(),
-            manifest: file_logger_manifest.clone(),
-        });
+        registry.add_package(
+            "org.yshi.staticserver",
+            RegistryEntry {
+                version: Version::parse("1.0.5").unwrap(),
+                sha256s: Default::default(),
+                manifest: staticserver_manifest,
+            },
+        );
+        registry.add_package(
+            "org.yshi.file-logger",
+            RegistryEntry {
+                version: Version::parse("1.0.0").unwrap(),
+                sha256s: Default::default(),
+                manifest: file_logger_manifest.clone(),
+            },
+        );
+        registry.add_package(
+            "org.yshi.file-logger",
+            RegistryEntry {
+                version: Version::parse("1.0.1").unwrap(),
+                sha256s: Default::default(),
+                manifest: file_logger_manifest.clone(),
+            },
+        );
+        registry.add_package(
+            "org.yshi.file-logger",
+            RegistryEntry {
+                version: Version::parse("1.0.2").unwrap(),
+                sha256s: Default::default(),
+                manifest: file_logger_manifest.clone(),
+            },
+        );
+        registry.add_package(
+            "org.yshi.file-logger",
+            RegistryEntry {
+                version: Version::parse("2.0.0-alpha1").unwrap(),
+                sha256s: Default::default(),
+                manifest: file_logger_manifest.clone(),
+            },
+        );
+        registry.add_package(
+            "org.yshi.file-logger",
+            RegistryEntry {
+                version: Version::parse("2.0.0").unwrap(),
+                sha256s: Default::default(),
+                manifest: file_logger_manifest.clone(),
+            },
+        );
         let registry = RegistryShared::shared(registry);
 
         let template = ApplicationDeploymentTemplate {
             deployment_name: "example-deployment".into(),
-            public_services: vec![
-                PublicService {
-                    service_name: "org.yshi.staticserver.http".into(),
-                    binder: PublicServiceBinder::NativePortBinder(NativePortBinder {
-                        bind_address: "::".into(),
-                        port: 8080,
-                        start_listen: true,
-                        flags: vec![SocketFlag::BehindHaproxy, SocketFlag::StartListen],
-                    })
-                }
-            ],
+            public_services: vec![PublicService {
+                service_name: "org.yshi.staticserver.http".into(),
+                binder: PublicServiceBinder::NativePortBinder(NativePortBinder {
+                    bind_address: "::".into(),
+                    port: 8080,
+                    start_listen: true,
+                    flags: vec![SocketFlag::BehindHaproxy, SocketFlag::StartListen],
+                }),
+            }],
             service_implementations: {
                 let mut map = BTreeMap::<String, ApplicationDeploymentRequirement>::new();
 
-                map.insert("org.yshi.log_target.v1.LogTarget".into(), ApplicationDeploymentRequirement {
-                    package_id: "org.yshi.file-logger".into(),
-                    version_req: VersionReq::parse("^1.0").unwrap(),
-                });
+                map.insert(
+                    "org.yshi.log_target.v1.LogTarget".into(),
+                    ApplicationDeploymentRequirement {
+                        package_id: "org.yshi.file-logger".into(),
+                        version_req: VersionReq::parse("^1.0").unwrap(),
+                    },
+                );
 
-                map.insert("org.yshi.staticserver.http".into(), ApplicationDeploymentRequirement {
-                    package_id: "org.yshi.staticserver".into(),
-                    version_req: VersionReq::parse("^1.0").unwrap(),
-                });
+                map.insert(
+                    "org.yshi.staticserver.http".into(),
+                    ApplicationDeploymentRequirement {
+                        package_id: "org.yshi.staticserver".into(),
+                        version_req: VersionReq::parse("^1.0").unwrap(),
+                    },
+                );
 
                 map
             },
             configuration: {
                 let mut map = BTreeMap::<String, serde_json::Value>::new();
 
-                map.insert("org.yshi.staticserver".into(), serde_json::json!({
-                    "allowed_hostnames": ["foobar-0436e87111796739188f.nydus.yshi.org"],
-                }));
+                map.insert(
+                    "org.yshi.staticserver".into(),
+                    serde_json::json!({
+                        "allowed_hostnames": ["foobar-0436e87111796739188f.nydus.yshi.org"],
+                    }),
+                );
 
                 map
             },
             sandbox: {
                 let mut map = BTreeMap::<String, Sandbox>::new();
 
-                map.insert("org.yshi.file-logger".into(),
-                    Sandbox::UnixUserConfinement(
-                        "sfs-aibi-log".into(),
-                        "sfs-aibi-log".into()
-                    ));
+                map.insert(
+                    "org.yshi.file-logger".into(),
+                    Sandbox::UnixUserConfinement("sfs-aibi-log".into(), "sfs-aibi-log".into()),
+                );
 
-                map.insert("org.yshi.staticserver".into(),
-                    Sandbox::UnixUserConfinement(
-                        "sfs-aibi-fe".into(),
-                        "sfs-aibi-fe".into()
-                    ));
+                map.insert(
+                    "org.yshi.staticserver".into(),
+                    Sandbox::UnixUserConfinement("sfs-aibi-fe".into(), "sfs-aibi-fe".into()),
+                );
 
                 map
             },
         };
 
-
-        let dm_expect: DeploymentManifest = serde_json::from_str(r#"{
+        let dm_expect: DeploymentManifest = serde_json::from_str(
+            r#"{
           "deployment_name": "example-deployment",
           "public_services": [
             {
@@ -361,7 +404,9 @@ mod tests {
               }
             }
           ]
-        }"#).unwrap();
+        }"#,
+        )
+        .unwrap();
 
         let mut rt = Runtime::new().unwrap();
         let dm = rt.block_on(resolve(&registry, &template)).unwrap();

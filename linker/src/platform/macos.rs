@@ -1,10 +1,10 @@
-use std::ffi::CString;
+use std::error::Error as StdError;
+use std::ffi::{CStr, CString};
 use std::fmt;
 use std::fs::File;
 use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
-use std::error::Error as StdError;
 
 use digest::FixedOutput;
 use nix::unistd::{execve, fork, lseek, unlink, write, ForkResult, Pid, Whence};
@@ -110,7 +110,7 @@ impl Executable {
         }
     }
 
-    pub fn execute(&self, arguments: &[CString], env: &[CString]) -> io::Result<Void> {
+    pub fn execute(&self, arguments: &[&CStr], env: &[&CStr]) -> io::Result<Void> {
         let path_bytes = OsStrExt::as_bytes(self.path.as_os_str());
         let artifact_path = CString::new(path_bytes).expect("valid c-string");
 
@@ -137,11 +137,15 @@ pub struct ExecConfig {
 
 fn execute_child(e: &ExecConfig) -> io::Result<Void> {
     let env = &[
-        CString::new("RUST_BACKTRACE=1").unwrap(),
-        CString::new("YSCLOUD=1").unwrap(),
+        CStr::from_bytes_with_nul(b"RUST_BACKTRACE=1\0").unwrap(),
+        CStr::from_bytes_with_nul(b"YSCLOUD=1\0").unwrap(),
     ];
     // need to relabel file descriptors here.
-    e.executable.execute(&e.arguments, env)?;
+    let mut cstrs: Vec<&CStr> = Vec::new();
+    for arg in &e.arguments {
+        cstrs.push(arg);
+    }
+    e.executable.execute(&cstrs[..], env)?;
 
     unreachable!();
 }
@@ -207,12 +211,23 @@ fn exec_artifact_child(e: &ExecExtras, c: AppPreforkConfiguration) -> io::Result
         Mode::S_IRUSR | Mode::S_IWUSR,
     )
     .map_err(|err| {
-        event!(Level::WARN, "error opening temporary ({}:{}): {:?}", file!(), line!(), err);
+        event!(
+            Level::WARN,
+            "error opening temporary ({}:{}): {:?}",
+            file!(),
+            line!(),
+            err
+        );
         io::Error::new(io::ErrorKind::Other, err)
     })?;
 
     if let Err(err) = unlink(&path as &str) {
-        event!(Level::WARN, "failed to unlink temporary file {}: {}", path, err);
+        event!(
+            Level::WARN,
+            "failed to unlink temporary file {}: {}",
+            path,
+            err
+        );
     }
 
     let data = serde_json::to_string(&app_config)?;
@@ -228,9 +243,23 @@ fn exec_artifact_child(e: &ExecExtras, c: AppPreforkConfiguration) -> io::Result
         CString::new(format!("{}", tmpfile)).unwrap(),
     ];
 
-    event!(Level::TRACE, "running {} {:?} in {} -- {}", package_id, arguments, e.workdir.display(), data);
+    event!(
+        Level::TRACE,
+        "running {} {:?} in {} -- {}",
+        package_id,
+        arguments,
+        e.workdir.display(),
+        data
+    );
     nix::unistd::chdir(&e.workdir).map_err(|err| {
-        event!(Level::WARN, "error changing directory to {:?} ({}:{}): {:?}", e.workdir, file!(), line!(), err);
+        event!(
+            Level::WARN,
+            "error changing directory to {:?} ({}:{}): {:?}",
+            e.workdir,
+            file!(),
+            line!(),
+            err
+        );
         io_other(err)
     })?;
 
@@ -263,4 +292,3 @@ where
 {
     io::Error::new(io::ErrorKind::Other, e)
 }
-

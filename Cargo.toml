@@ -1,8 +1,5 @@
 [workspace]
 members = [
-	"acme-ssl",
-	"blog",
-	"blog/hyper-staticfile",
 	"experiments/esockets",
 	"experiments/linkerclient",
 	"experiments/sni-multiplexor",

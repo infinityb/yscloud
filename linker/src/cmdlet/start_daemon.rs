@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use clap::{App, Arg, SubCommand};
-use log::{trace, warn};
+use tracing::{event, Level};
 
 use super::common;
 use crate::start_daemon::{start, Config};
@@ -31,14 +31,18 @@ pub fn get_subcommand() -> App<'static, 'static> {
 pub fn main(matches: &clap::ArgMatches) {
     let approot = matches.value_of_os("approot").unwrap();
     let approot = Path::new(approot).to_owned();
-    trace!("got approot: {}", approot.display());
+    event!(Level::TRACE, "got approot: {}", approot.display());
 
     let artifacts = matches.value_of("artifacts").unwrap().to_string();
-    trace!("got artifacts: {:?}", artifacts);
+    event!(Level::TRACE, "got artifacts: {:?}", artifacts);
 
     let control_socket = matches.value_of_os("control-socket").unwrap();
     let control_socket = Path::new(control_socket).to_owned();
-    trace!("got control-socket: {:?}", control_socket.display());
+    event!(
+        Level::TRACE,
+        "got control-socket: {:?}",
+        control_socket.display()
+    );
 
     let mut overrides: HashMap<String, String> = HashMap::new();
     if let Some(override_args) = matches.values_of_lossy("artifact-override") {
@@ -49,7 +53,11 @@ pub fn main(matches: &clap::ArgMatches) {
             overrides.insert(package_name, artifact_path);
         }
 
-        warn!("development mode - using path overrides: {:?}", overrides);
+        event!(
+            Level::WARN,
+            "development mode - using path overrides: {:?}",
+            overrides
+        );
     }
 
     start(Config {

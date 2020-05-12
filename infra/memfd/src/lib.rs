@@ -3,17 +3,16 @@
 use std::ffi::{CString, OsStr};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::io::{RawFd, FromRawFd, AsRawFd};
+use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 
-pub use nix::fcntl::SealFlag;
-pub use nix::sys::memfd::MemFdCreateFlag;
 use nix::fcntl::FcntlArg;
-pub use nix::sys::stat::Mode;
+pub use nix::fcntl::SealFlag;
 use nix::sys::memfd::memfd_create;
+pub use nix::sys::memfd::MemFdCreateFlag;
 use nix::sys::stat::fchmod;
+pub use nix::sys::stat::Mode;
 
 use owned_fd::OwnedFd;
-
 
 #[derive(Debug)]
 pub struct MemFd {

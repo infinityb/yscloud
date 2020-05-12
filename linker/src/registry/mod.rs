@@ -1,28 +1,27 @@
-use std::pin::Pin;
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::fs::read_dir;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader};
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::Arc;
-use std::collections::BTreeMap;
 
 use failure::Fallible;
-use semver::{Version, VersionReq};
-use futures::prelude::{Future};
 use futures::future::FutureExt;
+use futures::prelude::Future;
+use semver::{Version, VersionReq};
 
-use yscloud_config_model::{RegistryEntry, ApplicationManifest};
+use yscloud_config_model::{ApplicationManifest, RegistryEntry};
 
 pub trait Registry {
     fn find_best_entry_for_version(
         &self,
         package_id: &str,
         ver_req: &VersionReq,
-    ) -> Pin<Box<dyn Future<Output=Fallible<RegistryEntry>> + Send + 'static>>;
+    ) -> Pin<Box<dyn Future<Output = Fallible<RegistryEntry>> + Send + 'static>>;
 }
-
 
 #[derive(Clone)]
 pub struct RegistryShared(Arc<dyn Registry + Send + Sync + 'static>);
@@ -36,7 +35,10 @@ pub struct MemRegistry {
 }
 
 impl RegistryShared {
-    pub fn shared<T>(reg: T) -> RegistryShared where T: Registry + Send + Sync + 'static {
+    pub fn shared<T>(reg: T) -> RegistryShared
+    where
+        T: Registry + Send + Sync + 'static,
+    {
         let boxed: Box<dyn Registry + Send + Sync + 'static> = Box::new(reg);
         let arc: Arc<dyn Registry + Send + Sync + 'static> = boxed.into();
         RegistryShared(arc)
@@ -48,7 +50,7 @@ impl Registry for RegistryShared {
         &self,
         package_id: &str,
         ver_req: &VersionReq,
-    ) -> Pin<Box<dyn Future<Output=Fallible<RegistryEntry>> + Send + 'static>> {
+    ) -> Pin<Box<dyn Future<Output = Fallible<RegistryEntry>> + Send + 'static>> {
         Registry::find_best_entry_for_version(&*self.0, package_id, ver_req)
     }
 }
@@ -66,7 +68,7 @@ impl Registry for FileRegistry {
         &self,
         package_id: &str,
         ver_req: &VersionReq,
-    ) -> Pin<Box<dyn Future<Output=Fallible<RegistryEntry>> + Send + 'static>> {
+    ) -> Pin<Box<dyn Future<Output = Fallible<RegistryEntry>> + Send + 'static>> {
         let base_path = self.base_path.clone();
         let package_id = package_id.to_owned();
         let ver_req = ver_req.to_owned();
@@ -85,14 +87,14 @@ impl Registry for FileRegistry {
                 }
             }
 
-            let winner = current_winner
-                .ok_or_else(|| {
-                    let msg = format!("no valid versions for {}", package_id);
-                    io::Error::new(io::ErrorKind::Other, msg)
-                })?;
+            let winner = current_winner.ok_or_else(|| {
+                let msg = format!("no valid versions for {}", package_id);
+                io::Error::new(io::ErrorKind::Other, msg)
+            })?;
 
             registry_file_load_version(&base_path, &package_id, &winner)
-        }.boxed()
+        }
+        .boxed()
     }
 }
 
@@ -125,7 +127,11 @@ fn registry_file_get_versions(base_path: &Path, package_id: &str) -> Fallible<Ve
     Ok(out)
 }
 
-fn registry_file_load_version(base_path: &Path, package_id: &str, version: &Version) -> Fallible<RegistryEntry> {
+fn registry_file_load_version(
+    base_path: &Path,
+    package_id: &str,
+    version: &Version,
+) -> Fallible<RegistryEntry> {
     let mut hash_path = base_path.to_owned();
     hash_path.push(package_id);
     hash_path.push(format!("v{}", version));
@@ -184,10 +190,10 @@ impl Registry for MemRegistry {
         &self,
         package_id: &str,
         ver_req: &VersionReq,
-    ) -> Pin<Box<dyn Future<Output=Fallible<RegistryEntry>> + Send + 'static>> {
+    ) -> Pin<Box<dyn Future<Output = Fallible<RegistryEntry>> + Send + 'static>> {
         let min_version = Version::new(0, 0, 0);
         let min_key = (package_id.to_owned(), min_version);
-        
+
         let mut current_winner: Option<&Version> = None;
         for ((p_id, version), _entry) in self.known_entries.range(min_key..) {
             if p_id != package_id {
@@ -209,10 +215,9 @@ impl Registry for MemRegistry {
             Some(winning_version) => {
                 let key = (package_id.to_owned(), winning_version.to_owned());
                 Ok(self.known_entries.get(&key).unwrap().clone())
-            },
-            None => {
-                Err(io::Error::new(io::ErrorKind::Other, "no valid versions").into())
             }
-        }).boxed()
+            None => Err(io::Error::new(io::ErrorKind::Other, "no valid versions").into()),
+        })
+        .boxed()
     }
 }

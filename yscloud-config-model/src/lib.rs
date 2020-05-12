@@ -22,7 +22,7 @@ pub struct DeploymentManifest {
     pub deployment_name: String,
     pub public_services: Vec<DeployedPublicService>,
     pub components: Vec<DeployedApplicationManifest>,
-    
+
     // internal use only.
     #[serde(default = "Default::default")]
     pub path_overrides: HashMap<String, String>,

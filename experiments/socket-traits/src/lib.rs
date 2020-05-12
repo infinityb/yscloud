@@ -1,9 +1,7 @@
 // use std::pin::Unpin;
 
 pub mod dynamic;
-pub use self::dynamic::{
-    DynamicSocket,
-};
+pub use self::dynamic::DynamicSocket;
 
 pub trait Socket<'a> {
     type ReadHalf: tokio::io::AsyncRead + Send + Unpin + 'a;

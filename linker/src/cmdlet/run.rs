@@ -5,8 +5,8 @@ use std::os::unix::io::AsRawFd;
 use std::path::Path;
 
 use clap::{App, Arg, SubCommand};
+use tracing::{event, span, Level};
 use uuid::Uuid;
-use tracing::{span, Level, event};
 
 use sockets::socketpair_raw;
 use yscloud_config_model::{
@@ -60,7 +60,11 @@ pub fn main(matches: &clap::ArgMatches) {
             overrides.insert(package_name, artifact_path);
         }
 
-        event!(Level::WARN,"development mode - using path overrides: {:?}", overrides);
+        event!(
+            Level::WARN,
+            "development mode - using path overrides: {:?}",
+            overrides
+        );
     }
 
     event!(Level::INFO,
@@ -91,19 +95,24 @@ fn reify_service_connections(
     artifact_path: &str,
     approot: &Path,
 ) -> Result<Vec<crate::ExecSomething>, Box<dyn StdError>> {
-    let span = span!(Level::INFO, "reify_service_connections",
+    let span = span!(
+        Level::INFO,
+        "reify_service_connections",
         artifact_path = artifact_path,
-        approot = &approot.display().to_string()[..]);
+        approot = &approot.display().to_string()[..]
+    );
 
     let mut instances = HashMap::<Uuid, ExecSomething>::new();
     let mut instance_components = HashMap::<Uuid, &DeployedApplicationManifest>::new();
-    let mut instance_by_package = HashMap::<&str, Uuid>::new();        
+    let mut instance_by_package = HashMap::<&str, Uuid>::new();
 
     for component in &dm.components {
         let artifact = if let Some(path) = dm.path_overrides.get(&component.package_id) {
-            event!(Level::WARN,
+            event!(
+                Level::WARN,
                 "because of override, trying to find package {:?} @ {}",
-                component.package_id, path
+                component.package_id,
+                path
             );
             direct_load_artifact(&path)?
         } else {
@@ -120,11 +129,15 @@ fn reify_service_connections(
         builder.set_workdir(&workdir).unwrap();
 
         if let Sandbox::UnixUserConfinement(ref user, ref group) = component.sandbox {
-            event!(parent: &span, Level::INFO,
+            event!(
+                parent: &span,
+                Level::INFO,
                 confinement.kind = "UNIX",
                 confinement.unix_user = &user[..],
                 confinement.unix_group = &group[..],
-                "setting up confinement: UNIX({}:{})", user, group
+                "setting up confinement: UNIX({}:{})",
+                user,
+                group
             );
             builder.set_user(user).unwrap();
             builder.set_group(group).unwrap();
@@ -149,7 +162,11 @@ fn reify_service_connections(
         instance_components.insert(instance_id, component);
         instance_by_package.insert(&component.package_id, instance_id);
     }
-    event!(parent: &span, Level::TRACE, instance_component_count = instance_components.len());
+    event!(
+        parent: &span,
+        Level::TRACE,
+        instance_component_count = instance_components.len()
+    );
 
     for ps in &dm.public_services {
         let instance_id = instance_by_package

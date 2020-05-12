@@ -1,19 +1,19 @@
-
 use std::collections::HashMap;
 use std::convert::TryInto;
 use std::error::Error as StdError;
 use std::fs::File;
-use std::io;
+use std::io::{self, Write};
 use std::os::unix::io::AsRawFd;
 use std::path::Path;
 use std::path::PathBuf;
 use std::pin::Pin;
 
 use failure::Fallible;
-use semver::Version;
 use futures::future::{Future, FutureExt};
-use log::{error, info, warn};
+use futures::stream::StreamExt;
+use semver::Version;
 use sockets::socketpair_raw;
+use tracing::{event, Level};
 use uuid::Uuid;
 use yscloud_config_model::{
     DeployedApplicationManifest, DeploymentManifest, FileDescriptorRemote, Protocol,
@@ -36,7 +36,7 @@ pub fn start(cfg: Config) {
     target_deployment_manifest.path_overrides = cfg.overrides.clone();
 
     let fut = download_components(&cfg, &target_deployment_manifest);
-    let rt = tokio::runtime::Runtime::new().unwrap();
+    let mut rt = tokio::runtime::Runtime::new().unwrap();
     let xx = rt.block_on(fut).unwrap();
     let reified = reify_service_connections(&target_deployment_manifest, xx, &cfg.approot).unwrap();
     crate::platform::run_reified(reified);
@@ -71,7 +71,6 @@ struct PackageKey {
 //         Pin<Box<dyn Future<Output = Fallible<(PackageKey, RegistryEntry)>> + Send>>,
 //     > = Vec::new();
 
-
 //     for component in &dm.components {
 //         if dm.path_overrides.get(&component.package_id).is_none() {
 
@@ -84,7 +83,7 @@ struct PackageKey {
 //             RegistryEntry {
 //                 version: component.version.clone(),
 //                 sha256s: triple_to_sha256,
-//                 manifest: 
+//                 manifest:
 //             }
 
 //             reg_futures.push(
@@ -93,7 +92,7 @@ struct PackageKey {
 
 //                     RegistryEntry {
 //                         version: component_version.clone(),
-//                         sha256s: 
+//                         sha256s:
 //                     }
 //                     let entry = reg_clone
 //                         .find_best_entry_for_version(&component_package_id, &component_req)
@@ -137,11 +136,14 @@ async fn download_components(
             let path: String = path.to_string();
             futures.push(
                 async move {
-                    warn!(
+                    event!(
+                        Level::WARN,
                         "because of override, trying to find package {:?} @ {}",
-                        component.package_id, path
+                        component.package_id,
+                        path
                     );
-                    warn!(
+                    event!(
+                        Level::WARN,
                         "package {:?} code signing is not required (local path)",
                         component.package_id
                     );
@@ -149,7 +151,7 @@ async fn download_components(
                     let executable = direct_load_artifact(&path)?;
                     Ok((pkg_key, Component { executable }))
                 }
-                    .boxed(),
+                .boxed(),
             );
         } else {
             let cfg = cfg.clone();
@@ -158,7 +160,7 @@ async fn download_components(
                     let executable = find_artifact(&cfg, component).await?;
                     Ok((pkg_key, Component { executable }))
                 }
-                    .boxed(),
+                .boxed(),
             );
         };
     }
@@ -189,26 +191,38 @@ async fn download_components(
         );
         let filename = &uri[cfg.artifacts.len() + 1..];
 
-        info!("fetching {} from {}", dam.package_id, uri);
+        event!(Level::INFO, "fetching {} from {}", dam.package_id, uri);
         // FIXME: async
-        let mut response = reqwest::get(&uri)?;
+        let response = reqwest::get(&uri).await?;
         // FIXME: add this information to the registry.
         let content_length = response.content_length().ok_or_else(|| {
             io::Error::new(io::ErrorKind::NotFound, "no content-length on server")
         })?;
 
         if DEFAULT_MAX_ARTIFACT_SIZE < content_length {
-            error!(
+            event!(
+                Level::ERROR,
                 "file-size of {} is {} bytes - this exceeds the maximum artifact size",
-                dam.package_id, content_length
+                dam.package_id,
+                content_length
             );
             return Err(io::Error::new(io::ErrorKind::Other, "artifact too large").into());
         }
 
-        info!("file-size of {} is {} bytes", dam.package_id, content_length);
+        event!(
+            Level::INFO,
+            "file-size of {} is {} bytes",
+            dam.package_id,
+            content_length
+        );
 
         let mut fac = ExecutableFactory::new(filename, content_length.try_into()?)?;
-        response.copy_to(&mut fac)?;
+
+        let mut resp_data = response.bytes_stream();
+        while let Some(v) = resp_data.next().await {
+            let v = v?;
+            fac.write(&v[..])?;
+        }
         fac.validate_sha(&sha)?;
         Ok(fac.finalize())
     }
@@ -281,12 +295,15 @@ fn reify_service_connections(
             .get_mut(instance_id)
             .ok_or_else(|| format!("internal error: unknown instance {:?}", instance_id))?;
 
-        info!(
+        event!(
+            Level::INFO,
             "binding public service {} to {:?}",
-            ps.service_id.service_name, ps.binder
+            ps.service_id.service_name,
+            ps.binder
         );
         let service_sock = bind_service(&ps.binder)?;
-        info!(
+        event!(
+            Level::INFO,
             "binded public service {} to {:?} - fd = {}",
             ps.service_id.service_name,
             ps.binder,

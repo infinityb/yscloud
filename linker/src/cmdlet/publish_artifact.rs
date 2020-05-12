@@ -1,8 +1,8 @@
 use std::path::Path;
 
 use clap::{App, Arg, SubCommand};
-use log::trace;
 use semver::Version;
+use tracing::{event, Level};
 
 use super::common;
 use crate::publish_artifact::{start, Config};
@@ -61,21 +61,21 @@ pub fn get_subcommand() -> App<'static, 'static> {
 pub fn main(matches: &clap::ArgMatches) {
     let registry = matches.value_of_os("registry").unwrap();
     let registry = Path::new(registry).to_owned();
-    trace!("got registry: {}", registry.display());
+    event!(Level::TRACE, "got registry: {}", registry.display());
 
     let package_id = matches.value_of("package-id").unwrap().to_string();
-    trace!("got package-id: {:?}", package_id);
+    event!(Level::TRACE, "got package-id: {:?}", package_id);
 
     let version = matches.value_of("version").unwrap().to_string();
     let version = Version::parse(&version).unwrap();
-    trace!("got version: {:?}", version);
+    event!(Level::TRACE, "got version: {:?}", version);
 
     let artifact = matches.value_of_os("artifact").unwrap();
     let artifact = Path::new(artifact).to_owned();
-    trace!("got artifact: {}", artifact.display());
+    event!(Level::TRACE, "got artifact: {}", artifact.display());
 
     let host_triple = matches.value_of("host-triple").unwrap().to_string();
-    trace!("got host-triple: {:?}", host_triple);
+    event!(Level::TRACE, "got host-triple: {:?}", host_triple);
 
     start(Config {
         registry,

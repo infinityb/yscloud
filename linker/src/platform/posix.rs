@@ -8,7 +8,7 @@ use std::thread;
 use nix::sys::signal::{kill, Signal};
 use nix::sys::wait::{waitpid, WaitStatus};
 use nix::unistd::Pid;
-use tracing::{Level, event, span};
+use tracing::{event, span, Level};
 
 use super::imp;
 use crate::platform::exec_artifact;
@@ -27,7 +27,8 @@ pub fn relabel_file_descriptors(c: &AppPreforkConfiguration) -> io::Result<AppCo
     for f in &c.files {
         let file_num = f.file.as_raw_fd() as usize;
         if keep_map.len() < file_num {
-            event!(Level::WARN,
+            event!(
+                Level::WARN,
                 "a keep-file is over {} - are we leaking file descriptors?",
                 keep_map.len()
             );
@@ -36,13 +37,21 @@ pub fn relabel_file_descriptors(c: &AppPreforkConfiguration) -> io::Result<AppCo
         event!(
             Level::DEBUG,
             "keeping {} for {}: {:?}",
-            file_num, c.artifact, f.service_name
+            file_num,
+            c.artifact,
+            f.service_name
         );
         keep_map[file_num] = true;
     }
     for (i, keep) in keep_map.iter().enumerate() {
         if !*keep && nix::unistd::close(i as i32).is_ok() {
-            event!(Level::DEBUG, "closed {} for {}:{}", i, c.package_id, c.instance_id);
+            event!(
+                Level::DEBUG,
+                "closed {} for {}:{}",
+                i,
+                c.package_id,
+                c.instance_id
+            );
         }
     }
 
@@ -81,7 +90,11 @@ pub fn run_reified(reified: Vec<crate::ExecSomething>) {
     for a in reified {
         let package_id = a.cfg.package_id.clone();
 
-        event!(Level::DEBUG, package_id = &package_id[..], "creating process");
+        event!(
+            Level::DEBUG,
+            package_id = &package_id[..],
+            "creating process"
+        );
         let child = exec_artifact(&a.extras, a.cfg).unwrap();
         event!(Level::DEBUG, package_id = &package_id[..], child.pid = ?child, "created process");
 
@@ -103,11 +116,19 @@ pub fn run_reified(reified: Vec<crate::ExecSomething>) {
                 if !second_kill {
                     info.sent_kill.store(true, Ordering::SeqCst);
                 }
-                event!(Level::INFO, "sending {} ({}) SIGTERM", pid, info.package_name);
+                event!(
+                    Level::INFO,
+                    "sending {} ({}) SIGTERM",
+                    pid,
+                    info.package_name
+                );
                 let sent_kill = kill(*pid, Signal::SIGTERM).is_ok();
-                event!(Level::INFO, 
+                event!(
+                    Level::INFO,
                     "sent {} ({}) SIGTERM, successful: {}",
-                    pid, info.package_name, sent_kill
+                    pid,
+                    info.package_name,
+                    sent_kill
                 );
             }
         }
@@ -120,12 +141,17 @@ pub fn run_reified(reified: Vec<crate::ExecSomething>) {
     thread::spawn(move || {
         if let Some(sig) = signals.forever().next() {
             signals.close();
-            event!(Level::INFO, "got {}, signaling to children to terminate", sig);
+            event!(
+                Level::INFO,
+                "got {}, signaling to children to terminate",
+                sig
+            );
             kill_all(&kill_targets, false);
         }
         if let Some(sig) = signals.forever().next() {
             signals.close();
-            event!(Level::INFO, 
+            event!(
+                Level::INFO,
                 "got {}, signaling to children to terminate (2nd attempt)",
                 sig
             );
@@ -139,7 +165,12 @@ pub fn run_reified(reified: Vec<crate::ExecSomething>) {
         match waitpid(None, None) {
             Ok(WaitStatus::Exited(pid, exit_code)) => {
                 let child_info = &pids[&pid];
-                event!(Level::INFO, "child {} exited {}", child_info.package_name, exit_code);
+                event!(
+                    Level::INFO,
+                    "child {} exited {}",
+                    child_info.package_name,
+                    exit_code
+                );
                 if exit_code != 0 {
                     child_exited_nonzero = true;
                 }
@@ -150,9 +181,11 @@ pub fn run_reified(reified: Vec<crate::ExecSomething>) {
             // literally why.
             Ok(WaitStatus::Signaled(pid, sig, cored)) => {
                 let child_info = &pids[&pid];
-                event!(Level::INFO, 
+                event!(
+                    Level::INFO,
                     "child {} exited via signal {}",
-                    child_info.package_name, sig
+                    child_info.package_name,
+                    sig
                 );
                 remaining_children -= 1;
                 if cored {
@@ -163,7 +196,7 @@ pub fn run_reified(reified: Vec<crate::ExecSomething>) {
                 kill_all(&pids, false);
             }
             Ok(ws) => {
-                event!(Level::WARN,"waitpid got an unexpected {:?}", ws);
+                event!(Level::WARN, "waitpid got an unexpected {:?}", ws);
             }
             Err(err) => {
                 panic!("waitpid err {}", err);
@@ -190,30 +223,30 @@ enum WaitpidExit {
 }
 
 pub fn waitpid_stream() -> WaitpidStream {
-    use tokio::runtime::current_thread::Runtime;
+    use tokio::runtime;
     use tokio::sync::mpsc;
-    use std::thread;
 
-    let (mut tx, mut rx) = mpsc::channel(0);
+    let (mut tx, rx) = mpsc::channel(0);
 
     std::thread::spawn(move || {
-        let mut runtime = Runtime::new().unwrap();
+        let mut runtime = runtime::Builder::new().basic_scheduler().build().unwrap();
+
         loop {
             match waitpid(None, None) {
                 Ok(WaitStatus::Exited(pid, exit_code)) => {
                     let res = runtime.block_on(tx.send(WaitpidValue {
                         pid,
-                        exit: WaitpidExit::Exited(exit_code)
+                        exit: WaitpidExit::Exited(exit_code),
                     }));
                     if res.is_err() {
                         // disconnected.
                         break;
                     }
                 }
-                Ok(WaitStatus::Signaled(pid, sig, cored)) => {
+                Ok(WaitStatus::Signaled(pid, sig, _cored)) => {
                     let res = runtime.block_on(tx.send(WaitpidValue {
                         pid,
-                        exit: WaitpidExit::Signaled(sig)
+                        exit: WaitpidExit::Signaled(sig),
                     }));
                     if res.is_err() {
                         // disconnected.
@@ -221,7 +254,7 @@ pub fn waitpid_stream() -> WaitpidStream {
                     }
                 }
                 Ok(ws) => {
-                    event!(Level::WARN,"waitpid got an unexpected {:?}", ws);
+                    event!(Level::WARN, "waitpid got an unexpected {:?}", ws);
                 }
                 Err(err) => {
                     panic!("waitpid err {}", err);
@@ -230,7 +263,5 @@ pub fn waitpid_stream() -> WaitpidStream {
         }
     });
 
-    WaitpidStream {
-        channel: rx,
-    }
+    WaitpidStream { channel: rx }
 }

@@ -1,8 +1,6 @@
 use std::io;
 
 use clap::{App, AppSettings, Arg};
-use env_logger::Builder;
-use log::{debug, error, info, trace, warn, LevelFilter};
 use uuid::Uuid;
 
 use owned_fd::OwnedFd;
@@ -12,8 +10,8 @@ use yscloud_config_model::{
 };
 
 use tracing::{event, Level};
-use tracing_subscriber::FmtSubscriber;
 use tracing_subscriber::filter::LevelFilter as TracingLevelFilter;
+use tracing_subscriber::FmtSubscriber;
 
 pub mod platform;
 
@@ -60,8 +58,6 @@ fn main() {
         .get_matches();
 
     let mut print_test_logging = false;
-    let mut builder = Builder::from_default_env();
-    builder.default_format_module_path(true);
 
     let mut verbosity = matches.occurrences_of("v");
     let debugging = matches.occurrences_of("d");
@@ -72,34 +68,22 @@ fn main() {
         print_test_logging = true;
     }
 
-    match debugging {
-        0 => builder.filter_level(LevelFilter::Error),
-        1 => builder.filter_level(LevelFilter::Warn),
-        2 => builder.filter_level(LevelFilter::Info),
-        3 => builder.filter_level(LevelFilter::Debug),
-        _ => builder.filter_level(LevelFilter::Trace),
-    };
-
     match verbosity {
-        0 => builder.filter_module("yscloud_linker", LevelFilter::Error),
-        1 => builder.filter_module("yscloud_linker", LevelFilter::Warn),
-        2 => builder.filter_module("yscloud_linker", LevelFilter::Info),
-        3 => builder.filter_module("yscloud_linker", LevelFilter::Debug),
-        _ => builder.filter_module("yscloud_linker", LevelFilter::Trace),
-    };
-
-    match debugging {
-        0 => my_subscriber_builder = my_subscriber_builder.with_max_level(TracingLevelFilter::ERROR),
+        0 => {
+            my_subscriber_builder = my_subscriber_builder.with_max_level(TracingLevelFilter::ERROR)
+        }
         1 => my_subscriber_builder = my_subscriber_builder.with_max_level(TracingLevelFilter::WARN),
         2 => my_subscriber_builder = my_subscriber_builder.with_max_level(TracingLevelFilter::INFO),
-        3 => my_subscriber_builder = my_subscriber_builder.with_max_level(TracingLevelFilter::DEBUG),
-        _ => my_subscriber_builder = my_subscriber_builder.with_max_level(TracingLevelFilter::TRACE),
+        3 => {
+            my_subscriber_builder = my_subscriber_builder.with_max_level(TracingLevelFilter::DEBUG)
+        }
+        _ => {
+            my_subscriber_builder = my_subscriber_builder.with_max_level(TracingLevelFilter::TRACE)
+        }
     };
 
     tracing::subscriber::set_global_default(my_subscriber_builder.finish())
         .expect("setting tracing default failed");
-
-    builder.init();
 
     if print_test_logging {
         event!(Level::TRACE, "logger initialized - trace check");
@@ -107,13 +91,6 @@ fn main() {
         event!(Level::INFO, "logger initialized - info check");
         event!(Level::WARN, "logger initialized - warn check");
         event!(Level::ERROR, "logger initialized - error check");
-
-        // deprecated logging
-        trace!("logger initialized - trace check");
-        debug!("logger initialized - debug check");
-        info!("logger initialized - info check");
-        warn!("logger initialized - warn check");
-        error!("logger initialized - error check");
     }
 
     let (sub_name, args) = matches.subcommand();

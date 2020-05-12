@@ -23,8 +23,8 @@ mod base62;
 
 pub use self::base62::FmtBase62;
 
-use std::io;
 use std::fmt;
+use std::io;
 
 use byteorder::{BigEndian, ByteOrder};
 use rand::{Rand, Rng};
@@ -289,9 +289,7 @@ impl<'de> serde::de::Visitor<'de> for KsuidVisitor {
     where
         E: serde::de::Error,
     {
-        Ksuid::from_base62(value).map_err(|e| {
-            E::custom(format!("invalid ksuid: {}", e))
-        })
+        Ksuid::from_base62(value).map_err(|e| E::custom(format!("invalid ksuid: {}", e)))
     }
 }
 

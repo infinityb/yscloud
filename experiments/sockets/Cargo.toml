@@ -8,4 +8,4 @@ edition = "2018"
 
 [dependencies]
 owned_fd = { path = "../../infra/owned_fd" }
-nix = "0.14"
+nix = "0.17"

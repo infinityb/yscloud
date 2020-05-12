@@ -1,4 +1,4 @@
-use std::ffi::CString;
+use std::ffi::CStr;
 use std::fmt;
 use std::io;
 use std::path::Path;
@@ -83,7 +83,7 @@ impl Executable {
         imp::Executable::open(path).map(Executable)
     }
 
-    pub fn execute(&self, arguments: &[CString], env: &[CString]) -> io::Result<Void> {
+    pub fn execute(&self, arguments: &[&CStr], env: &[&CStr]) -> io::Result<Void> {
         imp::Executable::execute(&self.0, arguments, env)
     }
 }

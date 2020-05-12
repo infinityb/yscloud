@@ -156,10 +156,5 @@ pub fn socketpair_raw() -> io::Result<(OwnedFd, OwnedFd)> {
     )
     .map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
 
-    unsafe { 
-        Ok((
-            OwnedFd::from_raw_fd(left),
-            OwnedFd::from_raw_fd(right),
-        ))
-    }
+    unsafe { Ok((OwnedFd::from_raw_fd(left), OwnedFd::from_raw_fd(right))) }
 }

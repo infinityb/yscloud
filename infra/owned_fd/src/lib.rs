@@ -8,7 +8,7 @@ use nix::unistd::{read, write};
 use nix::unistd::lseek as lseek64;
 
 #[cfg(target_os = "linux")]
-use nix::unistd::lseek64 as lseek64;
+use nix::unistd::lseek64;
 
 #[derive(Debug)]
 pub struct OwnedFd {
@@ -39,7 +39,9 @@ impl FromRawFd for OwnedFd {
 
 impl From<File> for OwnedFd {
     fn from(fd: File) -> OwnedFd {
-        OwnedFd { raw_fd: fd.into_raw_fd() }
+        OwnedFd {
+            raw_fd: fd.into_raw_fd(),
+        }
     }
 }
 
