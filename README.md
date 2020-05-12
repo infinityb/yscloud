@@ -24,6 +24,7 @@ If the destination is an internal cloud destination and the remote application i
 
 `yscloud.identity-signer` formerly `org.yshi.internal_certificate_issuer`.  Need to spec out better.  Include in the yscloud-linker executable for now?  Need to support seamless restart of intrinsics.
 
+
 # Logging causality
 
 Application libraries? Do we even need it at this layer?  Probably should end up as an intrinsic service.

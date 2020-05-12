@@ -1,20 +1,51 @@
-use std::io;
+use std::io::{self, Read, Write, IoSlice, IoSliceMut};
 use std::task::{Context, Poll};
 use std::pin::Pin;
 use std::os::unix::io::AsRawFd;
+use std::mem::MaybeUninit;
+
 
 use bytes::buf::{Buf, BufMut};
-use futures_core::ready;
-use futures::io::AsyncReadExt;
-use mio::event::Evented;
 use mio::unix::EventedFd;
 use mio::{IoVec, Token, PollOpt, Poll as MioPoll, Ready as MioReady};
 use socket2::Socket;
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::io::{AsyncWriteExt, AsyncReadExt};
-use tokio_net::util::PollEvented;
+use tokio::io::PollEvented;
+
+macro_rules! ready {
+    ($e:expr $(,)?) => {
+        match $e {
+            std::task::Poll::Ready(t) => t,
+            std::task::Poll::Pending => return std::task::Poll::Pending,
+        }
+    };
+}
 
 struct StreamSocketInner(Socket);
+
+impl io::Read for StreamSocketInner {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.0.read(buf)
+    }
+
+    fn read_vectored(&mut self, bufs: &mut [IoSliceMut]) -> io::Result<usize> {
+        self.0.read_vectored(bufs)
+    }
+}
+
+impl io::Write for StreamSocketInner {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.0.write(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.0.flush()
+    }
+
+    fn write_vectored(&mut self, bufs: &[IoSlice]) -> io::Result<usize> {
+        self.0.write_vectored(bufs)
+    }
+}
 
 impl mio::event::Evented for StreamSocketInner {
     fn register(&self, poll: &MioPoll, token: Token, interest: MioReady, opts: PollOpt)
@@ -60,7 +91,7 @@ impl StreamSocket {
     ) -> Poll<io::Result<usize>> {
         ready!(self.io.poll_read_ready(cx, mio::Ready::readable()))?;
 
-        match self.io.get_ref().read(buf) {
+        match self.io.get_mut().0.read(buf) {
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
                 self.io.clear_read_ready(cx, mio::Ready::readable())?;
                 Poll::Pending
@@ -115,7 +146,7 @@ impl StreamSocket {
                 b16.into(),
             ];
             let n = buf.bytes_vec_mut(&mut bufs);
-            self.io.get_ref().read_bufs(&mut bufs[..n])
+            self.io.get_mut().read_bufs(&mut bufs[..n])
         };
 
         match r {
@@ -140,7 +171,7 @@ impl StreamSocket {
     ) -> Poll<io::Result<usize>> {
         ready!(self.io.poll_write_ready(cx))?;
 
-        match self.io.get_ref().write(buf) {
+        match self.io.get_mut().write(buf) {
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
                 self.io.clear_write_ready(cx)?;
                 Poll::Pending
@@ -164,7 +195,7 @@ impl StreamSocket {
             let iovec = <&IoVec>::from(DUMMY);
             let mut bufs = [iovec; 64];
             let n = buf.bytes_vec(&mut bufs);
-            self.io.get_ref().write_bufs(&bufs[..n])
+            self.io.get_mut().write_bufs(&bufs[..n])
         };
         match r {
             Ok(n) => {
@@ -181,7 +212,7 @@ impl StreamSocket {
 }
 
 impl AsyncRead for StreamSocket {
-    unsafe fn prepare_uninitialized_buffer(&self, _: &mut [u8]) -> bool {
+    unsafe fn prepare_uninitialized_buffer(&self, _: &mut [MaybeUninit<u8>]) -> bool {
         false
     }
 
@@ -218,13 +249,16 @@ impl AsyncWrite for StreamSocket {
     }
 
     fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
-        self.shutdown(std::net::Shutdown::Write);
+        let mut socket = PollEvented::get_mut(&mut self.io);
+        if let Err(e) = socket.0.shutdown(std::net::Shutdown::Write) {
+            return Poll::Ready(Err(e));
+        }
         Poll::Ready(Ok(()))
     }
 
     fn poll_write_buf<B: Buf>(
         self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
+        cx: &mut Context,
         buf: &mut B,
     ) -> Poll<io::Result<usize>> {
         self.poll_write_buf_priv(cx, buf)

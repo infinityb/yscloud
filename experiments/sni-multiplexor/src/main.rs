@@ -14,25 +14,27 @@ use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
 use tokio::net::UnixListener;
 use tokio::sync::Mutex;
-use yscloud_config_model::AppConfiguration;
+use yscloud_config_model::{AppConfiguration, FileDescriptorRemote, SocketFlag};
 
 mod context;
 mod dialer;
 mod erased;
 mod mgmt_proto;
 // mod resolver2;
+mod error;
+mod helpers;
+mod ioutil;
+mod model;
 mod resolver;
 mod sni2;
 mod sni_base;
 mod state_track;
-mod helpers;
-mod model;
-mod error;
-mod ioutil;
 
-use self::model::{config::ConfigResolverInit, SocketAddrPair, ClientCtx};
-use self::mgmt_proto::{start_management_client};
-use self::resolver::{BackendManager};
+use self::mgmt_proto::start_management_client;
+use self::model::{
+    config::ConfigResolverInit, ClientCtx, HaproxyProxyHeaderVersion, SocketAddrPair,
+};
+use self::resolver::BackendManager;
 use self::state_track::SessionManager;
 
 const CARGO_PKG_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -123,6 +125,7 @@ async fn main() {
     builder.init();
 
     let mut sni_director_sock = None;
+    let mut sni_director_sock_haproxy_proxy_header_version = None;
     let mut management_sock = None;
     for file in &config.files {
         if file.service_name == "org.yshi.sni_multiplexor.https" {
@@ -130,6 +133,15 @@ async fn main() {
             ::nix::sys::socket::listen(file.file_num, 128).unwrap();
 
             sni_director_sock = Some(unsafe { StdTcpListener::from_raw_fd(file.file_num) });
+            if let FileDescriptorRemote::Socket(ref si) = file.remote {
+                for flag in &si.flags {
+                    if *flag == SocketFlag::BehindHaproxy {
+                        sni_director_sock_haproxy_proxy_header_version =
+                            Some(HaproxyProxyHeaderVersion::Version1);
+                    }
+                }
+            }
+
             break;
         }
     }
@@ -152,7 +164,9 @@ async fn main() {
         backends.insert(k, v.into());
     }
 
-    let resolver = Arc::new(Mutex::new(BackendManager { backends: Arc::new(backends) }));
+    let resolver = Arc::new(Mutex::new(BackendManager {
+        backends: Arc::new(backends),
+    }));
     let mgmt_resolver = Arc::clone(&resolver);
     let data_resolver = resolver;
 
@@ -161,8 +175,7 @@ async fn main() {
     let data_sessman = sessman;
 
     let mgmt_server = async {
-        let mut mgmt_listener: UnixListener =
-            UnixListener::from_std(management_sock).unwrap();
+        let mut mgmt_listener: UnixListener = UnixListener::from_std(management_sock).unwrap();
 
         let mut mgmt_incoming = mgmt_listener.incoming();
         loop {
@@ -179,7 +192,7 @@ async fn main() {
                             warn!("management client terminated: {}", err);
                         }
                     });
-                },
+                }
                 Some(Err(err)) => {
                     warn!("failed to accept a socket: {}", err);
                 }
@@ -189,8 +202,7 @@ async fn main() {
     };
 
     let data_server = async {
-        let mut data_listener: TcpListener =
-            TcpListener::from_std(sni_director_sock).unwrap();
+        let mut data_listener: TcpListener = TcpListener::from_std(sni_director_sock).unwrap();
 
         let mut data_incoming = data_listener.incoming();
 
@@ -236,9 +248,10 @@ async fn main() {
                     client_conn,
                     socket,
                     ClientCtx {
-                        proxy_header_version: None,
+                        proxy_header_version: sni_director_sock_haproxy_proxy_header_version,
                     },
-                ).await;
+                )
+                .await;
 
                 if let Err(err) = res {
                     warn!("error handling client: {:?}", err);

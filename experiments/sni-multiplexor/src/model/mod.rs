@@ -1,9 +1,9 @@
 use std::io;
-use std::path::PathBuf;
 use std::net::{SocketAddr, SocketAddrV4, SocketAddrV6};
+use std::path::PathBuf;
 
-use serde::{Serialize, Deserialize};
 use failure::{Error, Fail};
+use serde::{Deserialize, Serialize};
 
 pub mod config;
 
@@ -20,12 +20,13 @@ pub enum BackendArgsFlags {
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
-#[serde(rename_all="lowercase")]
+#[serde(rename_all = "lowercase")]
 pub enum HaproxyProxyHeaderVersion {
     Version1,
     Version2,
 }
 
+#[derive(Debug)]
 pub struct ClientCtx {
     pub proxy_header_version: Option<HaproxyProxyHeaderVersion>,
 }
@@ -66,7 +67,10 @@ impl From<ppp::model::Addresses> for SocketAddrPair {
                 source_port,
                 destination_port,
             } => SocketAddrPair::V4(SocketAddrPairV4 {
-                local_addr: SocketAddrV4::new(destination_address.into(), destination_port.unwrap_or(0)),
+                local_addr: SocketAddrV4::new(
+                    destination_address.into(),
+                    destination_port.unwrap_or(0),
+                ),
                 peer_addr: SocketAddrV4::new(source_address.into(), source_port.unwrap_or(0)),
             }),
             Addresses::IPv6 {
@@ -78,11 +82,10 @@ impl From<ppp::model::Addresses> for SocketAddrPair {
                 local_addr: SocketAddrV6::new(
                     destination_address.into(),
                     destination_port.unwrap_or(0),
-                    0, 0),
-                peer_addr: SocketAddrV6::new(
-                    source_address.into(),
-                    source_port.unwrap_or(0),
-                    0, 0),
+                    0,
+                    0,
+                ),
+                peer_addr: SocketAddrV6::new(source_address.into(), source_port.unwrap_or(0), 0, 0),
             }),
             Addresses::Unix { .. } => SocketAddrPair::Unix,
             Addresses::None => SocketAddrPair::Unknown,

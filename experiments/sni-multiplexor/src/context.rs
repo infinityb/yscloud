@@ -1,10 +1,10 @@
-use std::pin::Pin;
 use std::future::Future;
-use std::task::{Poll, Context};
+use std::pin::Pin;
+use std::task::{Context, Poll};
 
-use tokio::sync::watch;
-use tokio::stream::{Stream, StreamExt};
 use futures::future::select;
+use tokio::stream::{Stream, StreamExt};
+use tokio::sync::watch;
 
 pub fn channel() -> (Holder, Done) {
     let (tx, rx) = watch::channel(());
@@ -18,7 +18,8 @@ pub struct Done(watch::Receiver<()>);
 
 impl Done {
     pub async fn await_with<F>(mut self: Pin<&mut Self>, mut other: F) -> Result<F::Output, ()>
-        where F: Future + Unpin
+    where
+        F: Future + Unpin,
     {
         loop {
             let sself: &mut Self = &mut *self;
@@ -26,7 +27,7 @@ impl Done {
                 futures::future::Either::Left((Some(()), f)) => {
                     other = f;
                     continue;
-                },
+                }
                 futures::future::Either::Left((None, _)) => return Err(()),
                 futures::future::Either::Right((other_value, _)) => return Ok(other_value),
             }
@@ -35,7 +36,9 @@ impl Done {
 }
 
 impl From<watch::Receiver<()>> for Done {
-    fn from(w: watch::Receiver<()>) -> Done { Done(w) }
+    fn from(w: watch::Receiver<()>) -> Done {
+        Done(w)
+    }
 }
 
 impl Future for Done {

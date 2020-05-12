@@ -1,31 +1,36 @@
+use std::fmt::Write;
 use std::io;
 use std::pin::Pin;
-use std::task::{Poll, Context};
-use std::fmt::Write;
+use std::task::{Context, Poll};
 use std::{fmt, str};
 
-use bytes::{BytesMut, Bytes};
-use tokio::io::{AsyncRead, AsyncWrite};
+use bytes::{Bytes, BytesMut};
 use futures::future::Future;
+use tokio::io::{AsyncRead, AsyncWrite};
 
 pub fn read_into<'a, R>(
     source: &'a mut R,
     into: &'a mut BytesMut,
 ) -> impl Future<Output = io::Result<usize>> + 'a + Unpin
 where
-    R: AsyncRead + Unpin
+    R: AsyncRead + Unpin,
 {
-    struct AsyncReadAny<'a, R> where R: AsyncRead + Unpin {
+    struct AsyncReadAny<'a, R>
+    where
+        R: AsyncRead + Unpin,
+    {
         source: Pin<&'a mut R>,
         into: Pin<&'a mut BytesMut>,
     }
 
-    impl<'a, R: AsyncRead + Unpin> Future for AsyncReadAny<'a, R>
-    {
+    impl<'a, R: AsyncRead + Unpin> Future for AsyncReadAny<'a, R> {
         type Output = io::Result<usize>;
 
         fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
-            let AsyncReadAny { ref mut source, ref mut into } = *self;
+            let AsyncReadAny {
+                ref mut source,
+                ref mut into,
+            } = *self;
             let into: &mut BytesMut = &mut *into;
             AsyncRead::poll_read_buf(Pin::new(&mut *source), cx, into)
         }
@@ -42,25 +47,30 @@ pub fn write_from<'a, W>(
     to_write: &'a mut Bytes,
 ) -> impl Future<Output = io::Result<usize>> + 'a + Unpin
 where
-    W: AsyncWrite + Unpin
+    W: AsyncWrite + Unpin,
 {
-    struct AsyncWriteAny<'a, W> where W: AsyncWrite + Unpin {
+    struct AsyncWriteAny<'a, W>
+    where
+        W: AsyncWrite + Unpin,
+    {
         destination: Pin<&'a mut W>,
         to_write: Pin<&'a mut Bytes>,
     }
 
-    impl<'a, W: AsyncWrite + Unpin> Future for AsyncWriteAny<'a, W>
-    {
+    impl<'a, W: AsyncWrite + Unpin> Future for AsyncWriteAny<'a, W> {
         type Output = io::Result<usize>;
 
         fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
-            let AsyncWriteAny { ref mut destination, ref mut to_write } = *self;
+            let AsyncWriteAny {
+                ref mut destination,
+                ref mut to_write,
+            } = *self;
 
             match AsyncWrite::poll_write(Pin::new(&mut *destination), cx, &to_write) {
                 Poll::Ready(Ok(wlen)) => {
                     drop(to_write.split_to(wlen));
                     Poll::Ready(Ok(wlen))
-                },
+                }
                 Poll::Ready(Err(err)) => Poll::Ready(Err(err)),
                 Poll::Pending => Poll::Pending,
             }

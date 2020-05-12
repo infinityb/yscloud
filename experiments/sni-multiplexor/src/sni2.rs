@@ -1,33 +1,28 @@
 use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 use std::time::Instant;
-use std::task::{Poll, Context};
 
-use ppp::{parse_v1_header, parse_v2_header};
-use bytes::{BytesMut};
+use bytes::BytesMut;
 use copy_arena::{Allocator, Arena};
 use futures::future::{self, Future, FutureExt};
-use futures::stream::{StreamExt};
+use futures::stream::StreamExt;
 use log::{info, warn};
-use tokio::io::{AsyncRead};
-use tokio::net::{UnixStream, TcpStream};
+use ppp::{parse_v1_header, parse_v2_header};
+use tokio::io::AsyncRead;
+use tokio::net::{TcpStream, UnixStream};
 
-use socket_traits::{Socket, DynamicSocket, AsyncWriteClose};
+use ksuid::Ksuid;
+use socket_traits::{AsyncWriteClose, DynamicSocket, Socket};
 use tls::decode_client_hello;
 use tokio::sync::Mutex;
-use ksuid::Ksuid;
 
-use crate::model::{
-    SocketAddrPair,
-    HaproxyProxyHeaderVersion,
-    ClientCtx,
-    NetworkLocationAddress,
-};
-use crate::resolver::{Resolver2, BackendManager};
-use crate::sni_base::get_server_names;
 use crate::context;
 use crate::ioutil::{read_into, write_from, BinStr};
+use crate::model::{ClientCtx, HaproxyProxyHeaderVersion, NetworkLocationAddress, SocketAddrPair};
+use crate::resolver::{BackendManager, Resolver2};
+use crate::sni_base::get_server_names;
 use crate::state_track::{Session, SessionManager};
 
 enum SniDetectionError {
@@ -50,7 +45,10 @@ fn detect_sni_name(scratch: &mut Allocator, data: &[u8], eof: bool) -> io::Resul
         Ok(snames) => snames,
         Err(err) => {
             warn!("encountered {:?} while detecting SNI name", err);
-            return Err(io::Error::new(io::ErrorKind::Other, "ALERT_UNRECOGNIZED_NAME"));
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                "ALERT_UNRECOGNIZED_NAME",
+            ));
             // return Err(ALERT_UNRECOGNIZED_NAME);
         }
     };
@@ -65,7 +63,11 @@ fn detect_sni_name(scratch: &mut Allocator, data: &[u8], eof: bool) -> io::Resul
     Ok(Some(server_name))
 }
 
-fn detect_haproxy_header(proxy_header_version: HaproxyProxyHeaderVersion, sdata: &[u8], eof: bool) -> io::Result<Option<(usize, ppp::model::Header)>> {
+fn detect_haproxy_header(
+    proxy_header_version: HaproxyProxyHeaderVersion,
+    sdata: &[u8],
+    eof: bool,
+) -> io::Result<Option<(usize, ppp::model::Header)>> {
     use ppp::error::ParseError;
 
     let res = match proxy_header_version {
@@ -73,18 +75,12 @@ fn detect_haproxy_header(proxy_header_version: HaproxyProxyHeaderVersion, sdata:
         HaproxyProxyHeaderVersion::Version2 => parse_v2_header(sdata),
     };
     match res {
-        Ok((rest, header)) => {
-            Ok(Some((sdata.len() - rest.len(), header)))
-        }
+        Ok((rest, header)) => Ok(Some((sdata.len() - rest.len(), header))),
         Err(ParseError::Incomplete) if eof => {
             Err(io::Error::new(io::ErrorKind::Other, "incomplete handshake"))
         }
-        Err(ParseError::Incomplete) => {
-            Ok(None)
-        }
-        Err(ParseError::Failure) => {
-            Err(io::Error::new(io::ErrorKind::Other, "invalid handshake"))
-        }
+        Err(ParseError::Incomplete) => Ok(None),
+        Err(ParseError::Failure) => Err(io::Error::new(io::ErrorKind::Other, "invalid handshake")),
     }
 }
 
@@ -93,17 +89,19 @@ fn read_client_hello_sni<'a, R>(
     into: &'a mut BytesMut,
 ) -> impl Future<Output = io::Result<String>> + 'a + Unpin
 where
-    R: AsyncRead + Unpin
+    R: AsyncRead + Unpin,
 {
-    struct AsyncReadClientHello<'a, R> where R: AsyncRead + Unpin {
+    struct AsyncReadClientHello<'a, R>
+    where
+        R: AsyncRead + Unpin,
+    {
         source: Pin<&'a mut R>,
         into: Pin<&'a mut BytesMut>,
         arena: Arena,
         encountered_eof: bool,
     }
 
-    impl<'a, R: AsyncRead + Unpin> Future for AsyncReadClientHello<'a, R>
-    {
+    impl<'a, R: AsyncRead + Unpin> Future for AsyncReadClientHello<'a, R> {
         type Output = io::Result<String>;
 
         fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
@@ -117,6 +115,7 @@ where
             let into: &mut BytesMut = &mut *into;
             loop {
                 let mut allocator = arena.allocator();
+
                 match detect_sni_name(&mut allocator, &into[..], *encountered_eof)? {
                     Some(v) => return Poll::Ready(Ok(v)),
                     None => (), // try reading.
@@ -127,7 +126,7 @@ where
                         if wlen == 0 {
                             *encountered_eof = true;
                         }
-                    },
+                    }
                     Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
                     Poll::Pending => return Poll::Pending,
                 }
@@ -156,17 +155,19 @@ fn read_haproxy_header<'a, R>(
     into: &'a mut BytesMut,
 ) -> impl Future<Output = io::Result<HaproxyHeader>> + 'a + Unpin
 where
-    R: AsyncRead + Unpin
+    R: AsyncRead + Unpin,
 {
-    struct AsyncReadHaproxyHeader<'a, R> where R: AsyncRead + Unpin {
+    struct AsyncReadHaproxyHeader<'a, R>
+    where
+        R: AsyncRead + Unpin,
+    {
         proxy_header_version: HaproxyProxyHeaderVersion,
         source: Pin<&'a mut R>,
         into: Pin<&'a mut BytesMut>,
         encountered_eof: bool,
     }
 
-    impl<'a, R: AsyncRead + Unpin> Future for AsyncReadHaproxyHeader<'a, R>
-    {
+    impl<'a, R: AsyncRead + Unpin> Future for AsyncReadHaproxyHeader<'a, R> {
         type Output = io::Result<HaproxyHeader>;
 
         fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
@@ -185,7 +186,7 @@ where
                             raw_data: into.split_to(hlen).freeze().as_ref().to_vec(),
                             parsed,
                         }))
-                    },
+                    }
                     None => (), // try reading.
                 }
 
@@ -194,7 +195,7 @@ where
                         if wlen == 0 {
                             *encountered_eof = true;
                         }
-                    },
+                    }
                     Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
                     Poll::Pending => return Poll::Pending,
                 }
@@ -232,8 +233,7 @@ pub async fn sni_connect_and_copy(
     mut client: TcpStream,
     client_ctx: ClientCtx,
     // canceler: Done,
-) -> io::Result<()>
-{
+) -> io::Result<()> {
     let backend_man: BackendManager = {
         let backend_man = backend_man.lock().await;
         BackendManager::clone(&*backend_man)
@@ -247,6 +247,44 @@ pub async fn sni_connect_and_copy(
     let mut header_timeout = futures::stream::once(tokio::time::delay_for(client_hello_timeout));
     let (holder, mut canceler) = context::channel();
 
+    let mut haproxy_passthrough_header: Option<HaproxyHeader> = None;
+    let mut sni_hostname: Option<String> = None;
+    let mut client_to_backend_bytes: u64 = 0;
+    let mut backend_to_client_bytes: u64 = 0;
+    let mut backend_write_buf = BytesMut::with_capacity(64 * 1024);
+    let mut client_write_buf = BytesMut::with_capacity(64 * 1024);
+
+    if let Some(haproxy_v) = client_ctx.proxy_header_version {
+        let res = future::select(
+            header_timeout.next(),
+            read_haproxy_header(haproxy_v, &mut client, &mut backend_write_buf),
+        )
+        .await;
+
+        match res {
+            futures::future::Either::Left((timeout, _next_fut)) => {
+                warn!("HaproxyHeader timeout error: {:?}", timeout);
+
+                let mut sessman = sessman.lock().await;
+                sessman.mark_shutdown(&session_id);
+
+                return Ok(());
+            }
+            futures::future::Either::Right((Ok(haproxy_header), _timeout_fut)) => {
+                client_addr = haproxy_header.parsed.addresses.clone().into();
+                haproxy_passthrough_header = Some(haproxy_header);
+            }
+            futures::future::Either::Right((Err(err), _timeout_fut)) => {
+                warn!("HaproxyHeader read error: {:?}", err);
+
+                let mut sessman = sessman.lock().await;
+                sessman.mark_shutdown(&session_id);
+
+                return Ok(());
+            }
+        }
+    }
+
     {
         let mut sessman = sessman.lock().await;
         sessman.add_session(Session::new(
@@ -256,15 +294,6 @@ pub async fn sni_connect_and_copy(
             holder,
         ));
     }
-
-    let dialer_ctx = ();
-    let mut client_to_backend_bytes: u64 = 0;
-    let mut backend_to_client_bytes: u64 = 0;
-    let mut backend_write_buf = BytesMut::with_capacity(64 * 1024);
-    let mut client_write_buf = BytesMut::with_capacity(64 * 1024);
-
-    let mut haproxy_passthrough_header: Option<HaproxyHeader> = None;
-    let mut sni_hostname: Option<String> = None;
 
     // let handshake_fut = async {
     //     if let Some(haproxy_v) = client_ctx.proxy_header_version {
@@ -298,37 +327,13 @@ pub async fn sni_connect_and_copy(
 
     //     return Ok(())
     // }
-    if let Some(haproxy_v) = client_ctx.proxy_header_version {
-        let res = future::select(
-            header_timeout.next(),
-            read_haproxy_header(haproxy_v, &mut client, &mut backend_write_buf)).await;
-
-        match res {
-            futures::future::Either::Left((timeout, _next_fut)) => {
-                warn!("HaproxyHeader timeout error: {:?}", timeout);
-
-                let mut sessman = sessman.lock().await;
-                sessman.mark_shutdown(&session_id);
-
-                return Ok(());
-            },
-            futures::future::Either::Right((Ok(haproxy_header), _timeout_fut)) => {
-                // &haproxy_header.parsed;
-
-                haproxy_passthrough_header = Some(haproxy_header);
-            },
-            futures::future::Either::Right((Err(err), _timeout_fut)) => {
-                warn!("HaproxyHeader read error: {:?}", err);
-
-                let mut sessman = sessman.lock().await;
-                sessman.mark_shutdown(&session_id);
-
-                return Ok(());
-            },
-        }
-    }
-
-    match Pin::new(&mut canceler).await_with(timeout(client_hello_timeout, read_client_hello_sni(&mut client, &mut backend_write_buf))).await {
+    match Pin::new(&mut canceler)
+        .await_with(timeout(
+            client_hello_timeout,
+            read_client_hello_sni(&mut client, &mut backend_write_buf),
+        ))
+        .await
+    {
         Ok(Ok(Ok(hostname))) => sni_hostname = Some(hostname),
         Ok(Ok(Err(err))) => {
             warn!("ClientHello read error: {:?}", err);
@@ -358,12 +363,13 @@ pub async fn sni_connect_and_copy(
     };
 
     let sni_hostname = sni_hostname.unwrap();
-    
+
     {
         let mut sessman = sessman.lock().await;
         sessman.mark_backend_resolving(&session_id, &sni_hostname);
     }
 
+    info!("looking up SNI name: {:?}", sni_hostname);
     let bset = match backend_man.resolve(&sni_hostname).await {
         Ok(bset) => bset,
         Err(err) => {
@@ -380,7 +386,7 @@ pub async fn sni_connect_and_copy(
 
     if let Some(haproxy_v) = bset.haproxy_header_version {
         let tls_handshake = backend_write_buf.split().freeze();
-        
+
         if client_ctx.proxy_header_version.is_some() && bset.haproxy_header_allow_passthrough {
             let header = haproxy_passthrough_header.as_ref().unwrap();
             write_haproxy_header_from_parsed(&mut backend_write_buf, haproxy_v, &header.parsed);
@@ -418,7 +424,7 @@ pub async fn sni_connect_and_copy(
             }
 
             let mut to_write = backend_write_buf.split().freeze();
-            
+
             if to_write.is_empty() {
                 // EOF was reached.
                 break;
@@ -464,7 +470,7 @@ pub async fn sni_connect_and_copy(
 
         io::Result::Ok(())
     };
-    
+
     let mut force_destroy = false;
     let completion_fut = future::join(client_to_backend, backend_to_client).boxed();
     match Pin::new(&mut canceler).await_with(completion_fut).await {
@@ -491,7 +497,11 @@ pub async fn sni_connect_and_copy(
     Ok(())
 }
 
-fn write_haproxy_header_from_parsed(dst: &mut BytesMut, v: HaproxyProxyHeaderVersion, h: &ppp::model::Header) {
+fn write_haproxy_header_from_parsed(
+    dst: &mut BytesMut,
+    v: HaproxyProxyHeaderVersion,
+    h: &ppp::model::Header,
+) {
     use ppp::model::Version;
 
     let mut new_h = h.clone();
@@ -500,13 +510,24 @@ fn write_haproxy_header_from_parsed(dst: &mut BytesMut, v: HaproxyProxyHeaderVer
         HaproxyProxyHeaderVersion::Version2 => Version::Two,
     };
 
-    let bytes = ppp::to_bytes(new_h).unwrap();
-    dst.extend_from_slice(&bytes[..]);
+    match v {
+        HaproxyProxyHeaderVersion::Version1 => {
+            let header_string = ppp::to_string(new_h).expect("foobar");
+            dst.extend_from_slice(header_string.as_bytes());
+        }
+        HaproxyProxyHeaderVersion::Version2 => {
+            let bytes = ppp::to_bytes(new_h).expect("foobar");
+            dst.extend_from_slice(&bytes)
+        }
+    }
 }
 
-
-fn write_haproxy_header_from_socketaddr(dst: &mut BytesMut, v: HaproxyProxyHeaderVersion, ap: &SocketAddrPair) {
-    use ppp::model::{Header, Protocol, Command, Version};
+fn write_haproxy_header_from_socketaddr(
+    dst: &mut BytesMut,
+    v: HaproxyProxyHeaderVersion,
+    ap: &SocketAddrPair,
+) {
+    use ppp::model::{Command, Header, Protocol, Version};
 
     let version = match v {
         HaproxyProxyHeaderVersion::Version1 => Version::One,
@@ -518,18 +539,17 @@ fn write_haproxy_header_from_socketaddr(dst: &mut BytesMut, v: HaproxyProxyHeade
         Command::Proxy,
         Protocol::Stream,
         Vec::new(),
-        ap.clone().into());
+        ap.clone().into(),
+    );
 
     match v {
         HaproxyProxyHeaderVersion::Version1 => {
             let header_string = ppp::to_string(header).expect("foobar");
             dst.extend_from_slice(header_string.as_bytes());
-        },
+        }
         HaproxyProxyHeaderVersion::Version2 => {
             let bytes = ppp::to_bytes(header).expect("foobar");
             dst.extend_from_slice(&bytes)
-        },
+        }
     }
-    
 }
-

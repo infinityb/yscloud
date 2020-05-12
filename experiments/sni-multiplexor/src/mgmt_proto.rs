@@ -1,20 +1,23 @@
+use std::borrow::Cow;
+use std::collections::BTreeSet;
 use std::io;
 use std::str::FromStr;
 use std::sync::Arc;
-use std::borrow::Cow;
-use std::collections::BTreeSet;
 
 use bytes::{Bytes, BytesMut};
 use failure::{Error, Fail};
 use ksuid::Ksuid;
+use log::{debug, info};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::Mutex;
-use log::{debug, info};
 
-use crate::resolver::{BackendManager};
-use crate::model::{BackendArgs, BackendArgsFlags, SocketAddrPair, HaproxyProxyHeaderVersion, NetworkLocationAddress};
-use crate::state_track::{SessionExport, SessionManager};
 use crate::ioutil::{read_into, write_from};
+use crate::model::{
+    BackendArgs, BackendArgsFlags, HaproxyProxyHeaderVersion, NetworkLocationAddress,
+    SocketAddrPair,
+};
+use crate::resolver::BackendManager;
+use crate::state_track::{SessionExport, SessionManager};
 
 #[derive(Debug, Fail)]
 #[fail(display = "protocol error")]
@@ -179,20 +182,16 @@ impl FromStr for AsciiManagerRequest {
             "print-active-sessions" => Ok(AsciiManagerRequest::PrintActiveSessions),
             "dump-backends" => Ok(AsciiManagerRequest::DumpBackends),
             "destroy-session" => {
-                destroy_session_from_str_iter(parts)
-                    .map(AsciiManagerRequest::DestroySession)
+                destroy_session_from_str_iter(parts).map(AsciiManagerRequest::DestroySession)
             }
             "replace-backend" => {
-                backend_args_from_str_iter(parts)
-                    .map(AsciiManagerRequest::ReplaceBackend)
+                backend_args_from_str_iter(parts).map(AsciiManagerRequest::ReplaceBackend)
             }
             "add-held-backend" => {
-                backend_args_from_str_iter(parts)
-                    .map(AsciiManagerRequest::AddHeldBackend)
+                backend_args_from_str_iter(parts).map(AsciiManagerRequest::AddHeldBackend)
             }
             "remove-backends" => {
-                remove_backends_from_str_iter(parts)
-                    .map(AsciiManagerRequest::RemoveBackends)
+                remove_backends_from_str_iter(parts).map(AsciiManagerRequest::RemoveBackends)
             }
             "quit" => Ok(AsciiManagerRequest::Quit),
             _ => Err(MgmtProtocolError {
@@ -295,7 +294,10 @@ fn encode_print_active_sessions(
     Ok(())
 }
 
-fn encode_ascii_manager_response<'a>(item: &AsciiManagerResponse<'a>, dst: &mut BytesMut) -> Result<(), Error> {
+fn encode_ascii_manager_response<'a>(
+    item: &AsciiManagerResponse<'a>,
+    dst: &mut BytesMut,
+) -> Result<(), Error> {
     let mut scratch = [0; 1024];
     match *item {
         AsciiManagerResponse::PrintActive(ref sessinfo) => {
@@ -308,7 +310,7 @@ fn encode_ascii_manager_response<'a>(item: &AsciiManagerResponse<'a>, dst: &mut 
             dst.extend_from_slice(b"ERROR");
             if message.len() > 0 {
                 dst.extend_from_slice(b": ");
-                dst.extend_from_slice(message.as_bytes());   
+                dst.extend_from_slice(message.as_bytes());
             }
             dst.extend_from_slice(b"\n");
         }
@@ -357,7 +359,8 @@ where
             Err(err) => {
                 if let Some(mgmt_err) = err.downcast_ref::<MgmtProtocolError>() {
                     if mgmt_err.recoverable {
-                        let item = AsciiManagerResponse::GenericError(Cow::Borrowed(&mgmt_err.message));
+                        let item =
+                            AsciiManagerResponse::GenericError(Cow::Borrowed(&mgmt_err.message));
                         encode_ascii_manager_response(&item, &mut write_buf)?;
                         to_write = write_buf.split().freeze();
                         continue;
@@ -413,7 +416,9 @@ async fn handle_query(
         }
         AsciiManagerRequest::DumpBackends => {
             let backends = backend_man.lock().await;
-            Ok(AsciiManagerResponse::DumpBackends(BackendManager::clone(&backends)))
+            Ok(AsciiManagerResponse::DumpBackends(BackendManager::clone(
+                &backends,
+            )))
         }
         AsciiManagerRequest::AddHeldBackend(repl) => {
             let mut backends = backend_man.lock().await;
@@ -422,9 +427,9 @@ async fn handle_query(
                     held_backends.insert((repl.hostname, bid));
                     Ok(AsciiManagerResponse::GenericOk)
                 }
-                Err(err) => {
-                    Ok(AsciiManagerResponse::GenericError(format!("{:?}", err).into()))
-                }
+                Err(err) => Ok(AsciiManagerResponse::GenericError(
+                    format!("{:?}", err).into(),
+                )),
             }
         }
         AsciiManagerRequest::ReplaceBackend(repl) => {

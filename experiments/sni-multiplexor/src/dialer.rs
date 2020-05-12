@@ -1,8 +1,8 @@
-use std::collections::BTreeMap;
 use std::collections::hash_map::RandomState;
-use std::net::{Ipv6Addr, Ipv4Addr};
+use std::collections::BTreeMap;
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::path::PathBuf;
-use std::time::{Instant, Duration};
+use std::time::{Duration, Instant};
 
 use rand::rngs::StdRng;
 use smallvec::SmallVec;
@@ -76,7 +76,7 @@ impl BackendDialerState {
                     unix_socket_hash1: hasher1.finish(),
                     unix_socket_hash2: hasher2.finish(),
                 })
-            },
+            }
             BackendKey::TcpV4(v) => BackendKeyInternal::TcpV4(v),
             BackendKey::TcpV6(v) => BackendKeyInternal::TcpV6(v),
         }
@@ -132,7 +132,6 @@ impl BackendDialerState {
         //         //
         //     }
         // }
-
     }
 
     // pub fn start_dialing(&self, key: &BackendKeyInternal) -> StartHandle {
@@ -160,7 +159,6 @@ impl BackendStatistics {
             when: start.attempt_start,
             latency: Instant::now() - start.attempt_start,
         });
-
     }
 
     fn mark_failed_event(&mut self, start: StartHandle) {
@@ -209,7 +207,7 @@ impl LatencyHistory {
             self.data_points.push(dp);
         }
         self.data_points.sort_by_key(|t| t.latency);
-        
+
         let ninety_fifth_perc_idx = 19 * self.data_points.len() / 20;
         self.ninety_fifth_percentile = self.data_points[ninety_fifth_perc_idx].latency;
     }

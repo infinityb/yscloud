@@ -1,22 +1,19 @@
 use std::collections::{btree_map, BTreeMap};
 use std::future::Future;
-use std::sync::Arc;
 use std::str::FromStr;
+use std::sync::Arc;
 
-use log::info;
-use futures::future;
-use serde::{Deserialize, Serialize};
-use ksuid::Ksuid;
 use failure::{Error, Fail};
+use futures::future;
+use ksuid::Ksuid;
+use log::info;
 use rand::thread_rng;
+use serde::{Deserialize, Serialize};
 
-use crate::model::{
-    HaproxyProxyHeaderVersion,
-    BackendArgs,
-    BackendArgsFlags,
-    NetworkLocationAddress,
-};
 use crate::error::tls::ALERT_UNRECOGNIZED_NAME;
+use crate::model::{
+    BackendArgs, BackendArgsFlags, HaproxyProxyHeaderVersion, NetworkLocationAddress,
+};
 
 pub trait Resolver2 {
     type ResolveFuture: Future<Output = Result<BackendSet, Error>>;
@@ -37,7 +34,6 @@ pub struct BackendSet {
     pub haproxy_header_allow_passthrough: bool,
     pub locations: BTreeMap<Ksuid, NetworkLocationAddress>,
 }
-
 
 #[derive(Debug, Fail)]
 #[fail(display = "haproxy header version must match other backends")]
@@ -155,12 +151,8 @@ impl BackendManager {
         self.backends = Arc::new(backends);
     }
 
-
     fn sync_resolve(&self, hostname: &str) -> Result<BackendSet, Error> {
-        let backend_set = self
-            .backends
-            .get(hostname)
-            .ok_or(ALERT_UNRECOGNIZED_NAME)?;
+        let backend_set = self.backends.get(hostname).ok_or(ALERT_UNRECOGNIZED_NAME)?;
 
         Ok(backend_set_prune(backend_set))
     }

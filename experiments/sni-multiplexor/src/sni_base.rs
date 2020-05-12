@@ -1,4 +1,4 @@
-use failure::{Error};
+use failure::Error;
 use tls::{ClientHello, Extension, ExtensionServerName};
 
 use crate::error::tls::ALERT_INTERNAL_ERROR;

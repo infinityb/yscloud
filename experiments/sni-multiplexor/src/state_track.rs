@@ -5,9 +5,8 @@ use std::time::{Duration, Instant};
 
 use ksuid::Ksuid;
 
-use crate::model::SocketAddrPair;
 use crate::context;
-
+use crate::model::SocketAddrPair;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionState {
