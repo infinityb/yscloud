@@ -467,7 +467,87 @@ pub fn decode_client_hello<'arena>(
     }
 }
 
-const TLS_EXTENSION_SERVER_NAME: u16 = 0x0000;
+pub struct ExtensionDef {
+    pub id: u16,
+    pub name: &'static str,
+}
+
+const TLS_EXTENSION_SERVER_NAME_ID: u16 = 0x0000;
+const TLS_EXTENSION_SERVER_NAME: ExtensionDef = ExtensionDef {
+    id: TLS_EXTENSION_SERVER_NAME_ID,
+    name: "server_name",
+};
+
+const TLS_EXTENSION_SUPPORTED_GROUPS_ID: u16 = 0x000a;
+const TLS_EXTENSION_SUPPORTED_GROUPS: ExtensionDef = ExtensionDef {
+    id: TLS_EXTENSION_SUPPORTED_GROUPS_ID,
+    name: "supported_groups",
+};
+
+const TLS_EXTENSION_EC_POINT_FORMATS_ID: u16 = 0x000b;
+const TLS_EXTENSION_EC_POINT_FORMATS: ExtensionDef = ExtensionDef {
+    id: TLS_EXTENSION_EC_POINT_FORMATS_ID,
+    name: "ec_point_formats",
+};
+
+const TLS_EXTENSION_SIGNATURE_ALGORITHMS_ID: u16 = 0x000d;
+const TLS_EXTENSION_SIGNATURE_ALGORITHMS: ExtensionDef = ExtensionDef {
+    id: TLS_EXTENSION_SIGNATURE_ALGORITHMS_ID,
+    name: "signature_algorithms",
+};
+
+const TLS_EXTENSION_ENCRYPT_THEN_MAC_ID: u16 = 0x0016;
+const TLS_EXTENSION_ENCRYPT_THEN_MAC: ExtensionDef = ExtensionDef {
+    id: TLS_EXTENSION_ENCRYPT_THEN_MAC_ID,
+    name: "encrypt_then_mac",
+};
+
+const TLS_EXTENSION_EXTENDED_MASTER_SECRET_ID: u16 = 0x0017;
+const TLS_EXTENSION_EXTENDED_MASTER_SECRET: ExtensionDef = ExtensionDef {
+    id: TLS_EXTENSION_EXTENDED_MASTER_SECRET_ID,
+    name: "extended_master_secret",
+};
+
+const TLS_EXTENSION_SESSION_TICKET_ID: u16 = 0x0023;
+const TLS_EXTENSION_SESSION_TICKET: ExtensionDef = ExtensionDef {
+    id: TLS_EXTENSION_SESSION_TICKET_ID,
+    name: "session_ticket",
+};
+
+const TLS_EXTENSION_SUPPORTED_VERSIONS_ID: u16 = 0x002b;
+const TLS_EXTENSION_SUPPORTED_VERSIONS: ExtensionDef = ExtensionDef {
+    id: TLS_EXTENSION_SUPPORTED_VERSIONS_ID,
+    name: "supported_versions",
+};
+
+const TLS_EXTENSION_PSK_KEY_EXCHANGE_MODES_ID: u16 = 0x002d;
+const TLS_EXTENSION_PSK_KEY_EXCHANGE_MODES: ExtensionDef = ExtensionDef {
+    id: TLS_EXTENSION_PSK_KEY_EXCHANGE_MODES_ID,
+    name: "psk_key_exchange_modes",
+};
+
+const TLS_EXTENSION_KEY_SHARE_ID: u16 = 0x0033;
+const TLS_EXTENSION_KEY_SHARE: ExtensionDef = ExtensionDef {
+    id: TLS_EXTENSION_KEY_SHARE_ID,
+    name: "key_share",
+};
+
+pub fn tls_extension_lookup(id: u16) -> Option<ExtensionDef> {
+    match id {
+        TLS_EXTENSION_SERVER_NAME_ID => Some(TLS_EXTENSION_SERVER_NAME),
+        TLS_EXTENSION_SUPPORTED_GROUPS_ID => Some(TLS_EXTENSION_SUPPORTED_GROUPS),
+        TLS_EXTENSION_EC_POINT_FORMATS_ID => Some(TLS_EXTENSION_EC_POINT_FORMATS),
+        TLS_EXTENSION_SIGNATURE_ALGORITHMS_ID => Some(TLS_EXTENSION_SIGNATURE_ALGORITHMS),
+        TLS_EXTENSION_ENCRYPT_THEN_MAC_ID => Some(TLS_EXTENSION_ENCRYPT_THEN_MAC),
+        TLS_EXTENSION_EXTENDED_MASTER_SECRET_ID => Some(TLS_EXTENSION_EXTENDED_MASTER_SECRET),
+        TLS_EXTENSION_SESSION_TICKET_ID => Some(TLS_EXTENSION_SESSION_TICKET),
+        TLS_EXTENSION_SUPPORTED_VERSIONS_ID => Some(TLS_EXTENSION_SUPPORTED_VERSIONS),
+        TLS_EXTENSION_PSK_KEY_EXCHANGE_MODES_ID => Some(TLS_EXTENSION_PSK_KEY_EXCHANGE_MODES),
+        TLS_EXTENSION_KEY_SHARE_ID => Some(TLS_EXTENSION_KEY_SHARE),
+        _ => None,
+    }
+}
+
 
 #[derive(Debug, Copy, Clone)]
 pub struct ExtensionServerNameEntry<'arena>(pub &'arena str);
@@ -537,10 +617,29 @@ impl<'arena> ByteIterRead<'arena> for ExtensionServerName<'arena> {
     }
 }
 
-#[derive(Debug, Copy, Clone)]
+#[derive(Copy, Clone)]
 pub enum Extension<'arena> {
     ServerName(&'arena ExtensionServerName<'arena>),
     Unknown(u16, &'arena [u8]),
+}
+
+
+impl<'a> fmt::Debug for Extension<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            Extension::ServerName(ch) => {
+                f.debug_tuple("ServerName")
+                   .field(&ch)
+                   .finish()
+            },
+            Extension::Unknown(id, data) => {
+                f.debug_tuple("Unknown")
+                    .field(&id)
+                    .field(&BinStr(data))
+                    .finish()                    
+            }
+        }
+    }
 }
 
 impl<'arena> ByteIterRead<'arena> for Extension<'arena> {
@@ -562,7 +661,7 @@ impl<'arena> ByteIterRead<'arena> for Extension<'arena> {
 
         let ex_data = iter_skip(length, data)?;
         match ex_type {
-            TLS_EXTENSION_SERVER_NAME => {
+            TLS_EXTENSION_SERVER_NAME_ID => {
                 let mut ex_data_iter = ex_data.iter();
                 let server_name = ExtensionServerName::read_byte_iter(alloc, &mut ex_data_iter)?;
                 Ok(Extension::ServerName(alloc.alloc(server_name)))
@@ -660,3 +759,37 @@ mod tests {
         panic!();
     }
 }
+
+
+pub struct BinStr<'a>(pub &'a [u8]);
+
+impl fmt::Debug for BinStr<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "b\"")?;
+        for &b in self.0 {
+            match b {
+                b'\0' => write!(f, "\\0")?,
+                b'\n' => write!(f, "\\n")?,
+                b'\r' => write!(f, "\\r")?,
+                b'\t' => write!(f, "\\t")?,
+                b'\\' => write!(f, "\\\\")?,
+                b'"' => write!(f, "\\\"")?,
+                _ if 0x20 <= b && b < 0x7F => write!(f, "{}", b as char)?,
+                _ => write!(f, "\\x{:02x}", b)?,
+
+            }
+        }
+        write!(f, "\"")?;
+        Ok(())
+    }
+}
+
+pub struct BinStrBuf(pub Vec<u8>);
+
+impl fmt::Debug for BinStrBuf {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let bin_str = BinStr(&self.0);
+        write!(f, "{:?}.to_vec()", bin_str)
+    }
+}
+

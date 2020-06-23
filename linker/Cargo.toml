@@ -14,7 +14,7 @@ owned_fd = { path = "../infra/owned_fd" }
 # external 
 clap = { version = "2.32", default-features = false }
 digest = "0.8.0"
-failure = "0.1.5"
+failure = "0.1.8"
 futures = "0.3.5"
 nix = "0.17"
 rand = "0.7"
@@ -29,5 +29,5 @@ tempfile = "3.1"
 tokio = { version = "=0.2.20", default-features = false, features = ["rt-core", "tcp", "uds", "time", "stream", "sync"] }
 tracing = "0.1.13"
 tracing-subscriber = "0.2.5"
-users = "0.9.1"
-uuid = { version = "0.6", features = ["v4", "serde"] }
+users = "0.10.0"
+uuid = { version = "0.8.1", features = ["v4", "serde"] }

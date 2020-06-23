@@ -6,9 +6,9 @@ use std::sync::Arc;
 use failure::{Error, Fail};
 use futures::future;
 use ksuid::Ksuid;
-use log::info;
 use rand::thread_rng;
 use serde::{Deserialize, Serialize};
+use tracing::{event, Level};
 
 use crate::error::tls::ALERT_UNRECOGNIZED_NAME;
 use crate::model::{
@@ -87,7 +87,7 @@ impl BackendManager {
     pub fn remove_backend(&mut self, hostname: &str, nl: Ksuid) {
         let mut backends = BTreeMap::clone(&*self.backends);
 
-        info!("removing a backend from {}: {:?}", hostname, nl);
+        event!(Level::INFO, "removing a backend from {}: {:?}", hostname, nl);
 
         if let btree_map::Entry::Occupied(mut occ) = backends.entry(hostname.to_string()) {
             let backend_set = occ.get_mut();

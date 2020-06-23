@@ -8,15 +8,14 @@ use bytes::BytesMut;
 use copy_arena::{Allocator, Arena};
 use futures::future::{self, Future, FutureExt};
 use futures::stream::StreamExt;
-use log::{info, warn};
 use ppp::{parse_v1_header, parse_v2_header};
 use tokio::io::AsyncRead;
 use tokio::net::{TcpStream, UnixStream};
-
 use ksuid::Ksuid;
 use socket_traits::{AsyncWriteClose, DynamicSocket, Socket};
 use tls::decode_client_hello;
 use tokio::sync::Mutex;
+use tracing::{event, Level};
 
 use crate::context;
 use crate::ioutil::{read_into, write_from, BinStr};
@@ -41,10 +40,12 @@ fn detect_sni_name(scratch: &mut Allocator, data: &[u8], eof: bool) -> io::Resul
         }
     };
 
+    event!(Level::DEBUG, "got hello: {:#?}", client_hello);
+
     let server_names = match get_server_names(&client_hello) {
         Ok(snames) => snames,
         Err(err) => {
-            warn!("encountered {:?} while detecting SNI name", err);
+            event!(Level::WARN, "encountered {:?} while detecting SNI name", err);
             return Err(io::Error::new(
                 io::ErrorKind::Other,
                 "ALERT_UNRECOGNIZED_NAME",
@@ -133,6 +134,7 @@ where
             }
         }
     }
+
 
     let source = Pin::new(source);
     let into = Pin::new(into);
@@ -263,7 +265,7 @@ pub async fn sni_connect_and_copy(
 
         match res {
             futures::future::Either::Left((timeout, _next_fut)) => {
-                warn!("HaproxyHeader timeout error: {:?}", timeout);
+                event!(Level::WARN, "HaproxyHeader timeout error: {:?}", timeout);
 
                 let mut sessman = sessman.lock().await;
                 sessman.mark_shutdown(&session_id);
@@ -275,7 +277,7 @@ pub async fn sni_connect_and_copy(
                 haproxy_passthrough_header = Some(haproxy_header);
             }
             futures::future::Either::Right((Err(err), _timeout_fut)) => {
-                warn!("HaproxyHeader read error: {:?}", err);
+                event!(Level::WARN, "HaproxyHeader read error: {:?}", err);
 
                 let mut sessman = sessman.lock().await;
                 sessman.mark_shutdown(&session_id);
@@ -304,7 +306,7 @@ pub async fn sni_connect_and_copy(
     //                 //
     //             }
     //             Err(err) => {
-    //                 warn!("HaproxyHeader read error: {:?}", err);
+    //                 event!(Level::WARN, "HaproxyHeader read error: {:?}", err);
     //                 return false;
     //             }
     //         }
@@ -313,7 +315,7 @@ pub async fn sni_connect_and_copy(
     //     match read_client_hello_sni(&mut client, &mut backend_write_buf).await {
     //         Ok(hostname) => sni_hostname = hostname,
     //         Err(err) => {
-    //             warn!("ClientHello read error: {:?}", err);
+    //             event!(Level::WARN, "ClientHello read error: {:?}", err);
     //             return false;
     //         }
     //     }
@@ -336,7 +338,7 @@ pub async fn sni_connect_and_copy(
     {
         Ok(Ok(Ok(hostname))) => sni_hostname = Some(hostname),
         Ok(Ok(Err(err))) => {
-            warn!("ClientHello read error: {:?}", err);
+            event!(Level::WARN, "ClientHello read error: {:?}", err);
 
             // replace all these with a guard.
             let mut sessman = sessman.lock().await;
@@ -345,7 +347,7 @@ pub async fn sni_connect_and_copy(
             return Ok(());
         }
         Ok(Err(..)) => {
-            warn!("ClientHello read timed out - terminating");
+            event!(Level::WARN, "ClientHello read timed out - terminating");
 
             let mut sessman = sessman.lock().await;
             sessman.mark_shutdown(&session_id);
@@ -353,7 +355,7 @@ pub async fn sni_connect_and_copy(
             return Ok(());
         }
         Err(()) => {
-            warn!("connection destroyed");
+            event!(Level::WARN, "connection destroyed");
 
             let mut sessman = sessman.lock().await;
             sessman.mark_shutdown(&session_id);
@@ -369,11 +371,11 @@ pub async fn sni_connect_and_copy(
         sessman.mark_backend_resolving(&session_id, &sni_hostname);
     }
 
-    info!("looking up SNI name: {:?}", sni_hostname);
+    event!(Level::INFO, "looking up SNI name: {:?}", sni_hostname);
     let bset = match backend_man.resolve(&sni_hostname).await {
         Ok(bset) => bset,
         Err(err) => {
-            warn!("unimplemented - sending TLS error: {:?}", err);
+            event!(Level::WARN, "unimplemented - sending TLS error: {:?}", err);
 
             let mut sessman = sessman.lock().await;
             sessman.mark_shutdown(&session_id);
@@ -476,12 +478,12 @@ pub async fn sni_connect_and_copy(
     match Pin::new(&mut canceler).await_with(completion_fut).await {
         Ok((res1, res2)) => {
             if let Err(err) = res1 {
-                info!("client-to-backend error: {:?}", err);
+                event!(Level::INFO, "client-to-backend error: {:?}", err);
                 force_destroy = true;
             }
 
             if let Err(err) = res2 {
-                info!("backend-to-client error: {:?}", err);
+                event!(Level::INFO, "backend-to-client error: {:?}", err);
                 force_destroy = true;
             }
         }

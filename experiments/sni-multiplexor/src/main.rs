@@ -4,17 +4,19 @@ use std::net::TcpListener as StdTcpListener;
 use std::os::unix::io::{FromRawFd, RawFd};
 use std::os::unix::net::UnixListener as StdUnixListener;
 use std::sync::Arc;
+use std::pin::Pin;
 
 use clap::{App, Arg};
 use futures::future;
-use futures::stream::StreamExt;
-use log::warn;
-use log::LevelFilter;
+use futures::stream::{self, SelectAll, StreamExt};
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
 use tokio::net::UnixListener;
-use tokio::sync::Mutex;
+use tokio::sync::{mpsc, Mutex};
 use yscloud_config_model::{AppConfiguration, FileDescriptorRemote, SocketFlag};
+use tracing::{event, Level};
+use tracing_subscriber::filter::LevelFilter as TracingLevelFilter;
+use tracing_subscriber::FmtSubscriber;
 
 mod context;
 mod dialer;
@@ -42,6 +44,8 @@ const CARGO_PKG_NAME: &str = env!("CARGO_PKG_NAME");
 
 #[tokio::main]
 async fn main() {
+    let mut my_subscriber_builder = FmtSubscriber::builder();
+
     let matches = App::new("sni-director")
         .version(CARGO_PKG_VERSION)
         .author("Stacey Ell <stacey.ell@gmail.com>")
@@ -67,6 +71,7 @@ async fn main() {
         )
         .get_matches();
 
+
     let config_fd = matches
         .value_of("config-fd")
         .expect("only runnable as yscloud program for now");
@@ -77,52 +82,30 @@ async fn main() {
     #[derive(Deserialize, Serialize)]
     struct DebugLevel {
         verbosity: Option<u64>,
-        debug: Option<u64>,
     }
 
     let extras_str = serde_json::to_string(&config.extras).unwrap();
     let debug_level: DebugLevel = serde_json::from_str(&extras_str).unwrap();
 
-    let mut builder = env_logger::Builder::from_default_env();
-    builder.default_format_module_path(true);
+    let verbosity = debug_level.verbosity.unwrap_or_else(|| {
+        matches.occurrences_of("v")
+    });
+    let should_print_test_logging = 4 < verbosity;
 
-    match debug_level
-        .verbosity
-        .unwrap_or_else(|| matches.occurrences_of("v"))
-    {
-        0 => builder.filter_module(CARGO_PKG_NAME, LevelFilter::Error),
-        1 => builder.filter_module(CARGO_PKG_NAME, LevelFilter::Warn),
-        2 => builder.filter_module(CARGO_PKG_NAME, LevelFilter::Info),
-        3 => builder.filter_module(CARGO_PKG_NAME, LevelFilter::Debug),
-        4 | _ => builder.filter_module(CARGO_PKG_NAME, LevelFilter::Trace),
-    };
+    my_subscriber_builder = my_subscriber_builder.with_max_level(match verbosity {
+        0 => TracingLevelFilter::ERROR,
+        1 => TracingLevelFilter::WARN,
+        2 => TracingLevelFilter::INFO,
+        3 => TracingLevelFilter::DEBUG,
+        _ => TracingLevelFilter::TRACE,
+    });
 
-    match debug_level
-        .debug
-        .unwrap_or_else(|| matches.occurrences_of("d"))
-    {
-        0 => {
-            builder.filter_module(CARGO_PKG_NAME, LevelFilter::Error);
-            builder.filter(None, LevelFilter::Error);
-        }
-        1 => {
-            builder.filter_module(CARGO_PKG_NAME, LevelFilter::Warn);
-            builder.filter(None, LevelFilter::Warn);
-        }
-        2 => {
-            builder.filter_module(CARGO_PKG_NAME, LevelFilter::Info);
-            builder.filter(None, LevelFilter::Info);
-        }
-        3 => {
-            builder.filter_module(CARGO_PKG_NAME, LevelFilter::Debug);
-            builder.filter(None, LevelFilter::Debug);
-        }
-        4 | _ => {
-            builder.filter_module(CARGO_PKG_NAME, LevelFilter::Trace);
-            builder.filter(None, LevelFilter::Trace);
-        }
-    };
-    builder.init();
+    tracing::subscriber::set_global_default(my_subscriber_builder.finish())
+        .expect("setting tracing default failed");
+
+    if should_print_test_logging {
+        print_test_logging();
+    }
 
     let mut sni_director_sock = None;
     let mut sni_director_sock_haproxy_proxy_header_version = None;
@@ -170,78 +153,87 @@ async fn main() {
     let mgmt_resolver = Arc::clone(&resolver);
     let data_resolver = resolver;
 
+    let (mut client_futures_tx, mut client_futures) = mpsc::channel(16);
+
     let sessman = Arc::new(Mutex::new(SessionManager::new()));
     let mgmt_sessman = Arc::clone(&sessman);
     let data_sessman = sessman;
 
-    let mgmt_server = async {
+    let client_futures_tx_clone = client_futures_tx.clone();
+    client_futures_tx.send(tokio::spawn(async move {
+        let mut client_futures_tx = client_futures_tx_clone;
+
         let mut mgmt_listener: UnixListener = UnixListener::from_std(management_sock).unwrap();
 
         let mut mgmt_incoming = mgmt_listener.incoming();
-        loop {
+        while let Some(socket) = mgmt_incoming.next().await {
+            let socket = match socket {
+                Ok(s) => s,
+                Err(err) => {
+                    event!(Level::WARN, "failure accepting socket: {}", err);
+                    return;
+                }
+            };
+
             let sessman = mgmt_sessman.clone();
             let resolver = mgmt_resolver.clone();
 
-            let (next_item, tail) = mgmt_incoming.into_future().await;
-            mgmt_incoming = tail;
+            let join = tokio::spawn(async move {
+                if let Err(err) = start_management_client(sessman, resolver, socket).await {
+                    event!(Level::WARN, "management client terminated: {}", err);
+                }
+            });
 
-            match next_item {
-                Some(Ok(socket)) => {
-                    tokio::spawn(async move {
-                        if let Err(err) = start_management_client(sessman, resolver, socket).await {
-                            warn!("management client terminated: {}", err);
-                        }
-                    });
-                }
-                Some(Err(err)) => {
-                    warn!("failed to accept a socket: {}", err);
-                }
-                None => break,
-            };
+            if let Err(err) = client_futures_tx.send(join).await {
+                event!(Level::WARN, "failed to send future to task reaper: {:?}", err);
+                return;
+            }
         }
-    };
+    })).await.unwrap();
 
-    let data_server = async {
+    let client_futures_tx_clone = client_futures_tx.clone();
+    client_futures_tx.send(tokio::spawn(async move {
+        let mut client_futures_tx = client_futures_tx_clone;
+
         let mut data_listener: TcpListener = TcpListener::from_std(sni_director_sock).unwrap();
 
         let mut data_incoming = data_listener.incoming();
 
-        loop {
-            let (next_item, tail) = data_incoming.into_future().await;
-            data_incoming = tail;
-
-            let socket = match next_item {
-                Some(socket) => socket,
-                None => break,
+        while let Some(socket) = data_incoming.next().await {
+            let socket = match socket {
+                Ok(s) => s,
+                Err(err) => {
+                    event!(Level::WARN, "failure accepting socket: {}", err);
+                    return;
+                }
             };
-
-            let mut socket = socket.expect("FIXME");
 
             let laddr = match socket.local_addr() {
                 Ok(laddr) => laddr,
                 Err(err) => {
-                    warn!("bad local address for socket: {}", err);
+                    event!(Level::WARN, "bad local address for socket: {}", err);
                     continue;
                 }
             };
-            let paddr = match socket.peer_addr() {
-                Ok(paddr) => paddr,
-                Err(err) => {
-                    warn!("bad peer address for socket: {}", err);
-                    continue;
-                }
-            };
-            let client_conn = match SocketAddrPair::from_pair(laddr, paddr) {
-                Ok(paddr) => paddr,
-                Err(err) => {
-                    warn!("bad address pair for socket: {}", err);
-                    continue;
-                }
-            };
-
+            
             let data_sessman = Arc::clone(&data_sessman);
             let data_resolver = Arc::clone(&data_resolver);
-            tokio::spawn(async move {
+            let join = tokio::spawn(async move {
+                let paddr = match socket.peer_addr() {
+                    Ok(paddr) => paddr,
+                    Err(err) => {
+                        event!(Level::WARN, "bad peer address for socket: {}", err);
+                        return;
+                    }
+                };
+                let client_conn = match SocketAddrPair::from_pair(laddr, paddr) {
+                    Ok(paddr) => paddr,
+                    Err(err) => {
+                        event!(Level::WARN, "bad address pair for socket: {}", err);
+                        return;
+                    }
+                };
+
                 let res = sni2::sni_connect_and_copy(
                     data_sessman,
                     data_resolver,
@@ -254,11 +246,36 @@ async fn main() {
                 .await;
 
                 if let Err(err) = res {
-                    warn!("error handling client: {:?}", err);
+                    event!(Level::WARN, "error handling client: {:?}", err);
                 }
             });
-        }
-    };
 
-    future::join(mgmt_server, data_server).await;
+            if let Err(err) = client_futures_tx.send(join).await {
+                event!(Level::WARN, "failed to send future to task reaper: {:?}", err);
+                return;
+            }
+        }
+    })).await.unwrap();
+
+    let mut resolved = client_futures.buffer_unordered(1024);
+
+    while let Some(res) = resolved.next().await {
+        if let Err(err) = res {
+            if err.is_panic() {
+                std::panic::resume_unwind(err.into_panic());
+            }
+
+            event!(Level::WARN, "task exited uncleanly: {:?}", err);
+        }
+    }
+}
+
+
+#[allow(clippy::cognitive_complexity)] // macro bug around event!()
+fn print_test_logging() {
+    event!(Level::TRACE, "logger initialized - trace check");
+    event!(Level::DEBUG, "logger initialized - debug check");
+    event!(Level::INFO, "logger initialized - info check");
+    event!(Level::WARN, "logger initialized - warn check");
+    event!(Level::ERROR, "logger initialized - error check");
 }

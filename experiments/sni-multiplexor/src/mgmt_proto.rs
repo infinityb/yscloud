@@ -7,9 +7,9 @@ use std::sync::Arc;
 use bytes::{Bytes, BytesMut};
 use failure::{Error, Fail};
 use ksuid::Ksuid;
-use log::{debug, info};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::Mutex;
+use tracing::{event, Level};
 
 use crate::ioutil::{read_into, write_from};
 use crate::model::{
@@ -380,7 +380,7 @@ where
     }
 
     if held_backends.len() > 0 {
-        debug!("destroying held bindings...");
+        event!(Level::DEBUG, "destroying held bindings...");
 
         let mut backends = backends.lock().await;
         for h in held_backends.into_iter() {
@@ -389,7 +389,7 @@ where
         }
     }
 
-    info!("mgmt client close completed");
+    event!(Level::INFO, "mgmt client close completed");
 
     Ok(())
 }
