@@ -9,7 +9,7 @@ pub fn get_server_names<'arena>(
     for ext in hello.extensions.0 {
         match *ext {
             Extension::ServerName(name_ext) => return Ok(name_ext),
-            Extension::Unknown(..) => (),
+            _ => (),
         }
     }
     Err(ALERT_INTERNAL_ERROR.into())

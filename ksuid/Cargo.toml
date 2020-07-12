@@ -7,6 +7,7 @@ repository = "https://github.com/ecstatic-morse/ksuid.git"
 readme = "README.md"
 keywords = ["uuid", "ksuid", "guid"]
 license = "MIT"
+edition = "2018"
 
 [dependencies]
 byteorder = "1.0.0"

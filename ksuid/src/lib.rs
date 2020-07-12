@@ -14,11 +14,6 @@
 #![deny(missing_docs)]
 #![cfg_attr(feature = "bench", feature(test))]
 
-extern crate byteorder;
-extern crate rand;
-extern crate resize_slice;
-extern crate time;
-
 mod base62;
 
 pub use self::base62::FmtBase62;
@@ -65,8 +60,14 @@ fn hex_digit(c: u8) -> io::Result<u8> {
 /// [`EPOCH`](constant.EPOCH.html).
 ///
 /// The remaining 16 bytes is the randomly generated payload.
-#[derive(Clone, Copy, Ord, PartialOrd, Eq, PartialEq, Hash, Debug)]
+#[derive(Clone, Copy, Ord, PartialOrd, Eq, PartialEq, Hash)]
 pub struct Ksuid([u8; LEN]);
+
+impl fmt::Debug for Ksuid {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "Ksuid(\"{}\")", self.fmt_base62())
+    }
+}
 
 impl Ksuid {
     /// Create a new identifier with the given timestamp and payload.

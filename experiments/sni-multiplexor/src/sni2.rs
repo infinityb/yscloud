@@ -3,8 +3,10 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Instant;
+use std::net::Shutdown;
+use std::fmt;
 
-use bytes::BytesMut;
+use bytes::{Bytes, BytesMut};
 use copy_arena::{Allocator, Arena};
 use futures::future::{self, Future, FutureExt};
 use futures::stream::StreamExt;
@@ -23,40 +25,73 @@ use crate::model::{ClientCtx, HaproxyProxyHeaderVersion, NetworkLocationAddress,
 use crate::resolver::{BackendManager, Resolver2};
 use crate::sni_base::get_server_names;
 use crate::state_track::{Session, SessionManager};
+use crate::error::tls::{ALERT_INTERNAL_ERROR, ALERT_UNRECOGNIZED_NAME};
+
+// --
+
+#[derive(Debug)]
+pub enum ReadTimeoutPhase {
+    HaproxyHeader,
+    TlsHeader,
+    Data,
+}
+
+#[derive(Debug)]
+pub struct ReadTimeout {
+    phase: ReadTimeoutPhase,
+}
+
+impl fmt::Display for ReadTimeout {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "read timeout for {}", match self.phase {
+            ReadTimeoutPhase::HaproxyHeader => "haproxy header",
+            ReadTimeoutPhase::TlsHeader => "tls header",
+            ReadTimeoutPhase::Data => "data",
+        })
+    }
+}
+
+impl std::error::Error for ReadTimeout {}
+
+// --
+
+#[derive(Debug)]
+pub struct WriteTimeout;
+
+impl fmt::Display for WriteTimeout {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "WriteTimeout")
+    }
+}
+
+impl std::error::Error for WriteTimeout {}
+
+// --
 
 enum SniDetectionError {
     Truncated,
 }
 
-fn detect_sni_name(scratch: &mut Allocator, data: &[u8], eof: bool) -> io::Result<Option<String>> {
+fn detect_sni_name(scratch: &mut Allocator, data: &[u8], eof: bool) -> Result<Option<String>, failure::Error> {
     let client_hello = match decode_client_hello(scratch, data) {
         Ok(hello) => hello,
         Err(err) => {
             if err.is_truncated() && !eof {
                 return Ok(None);
             }
-            return Err(io::Error::new(io::ErrorKind::Other, "ALERT_INTERNAL_ERROR"));
-            // return Err(ALERT_INTERNAL_ERROR);
+            return Err(ALERT_INTERNAL_ERROR.into());
         }
     };
-
-    event!(Level::DEBUG, "got hello: {:#?}", client_hello);
-
     let server_names = match get_server_names(&client_hello) {
         Ok(snames) => snames,
         Err(err) => {
             event!(Level::WARN, "encountered {:?} while detecting SNI name", err);
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
-                "ALERT_UNRECOGNIZED_NAME",
-            ));
-            // return Err(ALERT_UNRECOGNIZED_NAME);
+            return Err(ALERT_UNRECOGNIZED_NAME.into());
         }
     };
 
     if server_names.0.len() != 1 {
-        return Err(io::Error::new(io::ErrorKind::Other, "ALERT_INTERNAL_ERROR"));
-        // return Err(ALERT_INTERNAL_ERROR);
+        return Err(ALERT_INTERNAL_ERROR.into());
     }
 
     let server_name = server_names.0[0].0.to_string();
@@ -88,7 +123,7 @@ fn detect_haproxy_header(
 fn read_client_hello_sni<'a, R>(
     source: &'a mut R,
     into: &'a mut BytesMut,
-) -> impl Future<Output = io::Result<String>> + 'a + Unpin
+) -> impl Future<Output = Result<String, failure::Error>> + 'a + Unpin
 where
     R: AsyncRead + Unpin,
 {
@@ -103,7 +138,7 @@ where
     }
 
     impl<'a, R: AsyncRead + Unpin> Future for AsyncReadClientHello<'a, R> {
-        type Output = io::Result<String>;
+        type Output = Result<String, failure::Error>;
 
         fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
             let AsyncReadClientHello {
@@ -128,7 +163,7 @@ where
                             *encountered_eof = true;
                         }
                     }
-                    Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+                    Poll::Ready(Err(err)) => return Poll::Ready(Err(err.into())),
                     Poll::Pending => return Poll::Pending,
                 }
             }
@@ -231,11 +266,51 @@ async fn dial_backend(addr: &NetworkLocationAddress) -> io::Result<DynamicSocket
 pub async fn sni_connect_and_copy(
     sessman: Arc<Mutex<SessionManager>>,
     backend_man: Arc<Mutex<BackendManager>>,
+    client_addr: SocketAddrPair,
+    client: TcpStream,
+    client_ctx: ClientCtx,
+    // canceler: Done,
+) -> Result<(), failure::Error> {
+    let session_id = Ksuid::generate();
+
+    let (holder, mut canceler) = context::channel();
+
+    let mut sessman_locked = sessman.lock().await;
+    sessman_locked.add_session(Session::new(
+        session_id,
+        Instant::now(),
+        client_addr.clone(),
+        holder,
+    ));
+    drop(sessman_locked);
+
+    let res = sni_connect_and_copy_helper(
+        sessman.clone(), session_id, backend_man,
+        client_addr, client, client_ctx, canceler,
+    ).await;
+
+    if let Err(ref err) = res {
+        event!(Level::WARN, "error for {}: {}", session_id.to_base62(), err);
+    } else {
+        event!(Level::DEBUG, "ended session {} successfully", session_id.to_base62());
+    }
+
+    let mut sessman_locked = sessman.lock().await;
+    sessman_locked.mark_shutdown(&session_id);
+    drop(sessman_locked);
+
+    res
+}
+
+pub async fn sni_connect_and_copy_helper(
+    sessman: Arc<Mutex<SessionManager>>,
+    session_id: Ksuid,
+    backend_man: Arc<Mutex<BackendManager>>,
     mut client_addr: SocketAddrPair,
     mut client: TcpStream,
     client_ctx: ClientCtx,
-    // canceler: Done,
-) -> io::Result<()> {
+    mut canceler: context::Done,
+) -> Result<(), failure::Error> {
     let backend_man: BackendManager = {
         let backend_man = backend_man.lock().await;
         BackendManager::clone(&*backend_man)
@@ -243,16 +318,13 @@ pub async fn sni_connect_and_copy(
 
     use tokio::time::{timeout, Duration};
     let client_hello_timeout = Duration::new(4, 0);
-
-    let session_id = Ksuid::generate();
-
     let mut header_timeout = futures::stream::once(tokio::time::delay_for(client_hello_timeout));
-    let (holder, mut canceler) = context::channel();
 
     let mut haproxy_passthrough_header: Option<HaproxyHeader> = None;
     let mut sni_hostname: Option<String> = None;
     let mut client_to_backend_bytes: u64 = 0;
     let mut backend_to_client_bytes: u64 = 0;
+
     let mut backend_write_buf = BytesMut::with_capacity(64 * 1024);
     let mut client_write_buf = BytesMut::with_capacity(64 * 1024);
 
@@ -266,10 +338,6 @@ pub async fn sni_connect_and_copy(
         match res {
             futures::future::Either::Left((timeout, _next_fut)) => {
                 event!(Level::WARN, "HaproxyHeader timeout error: {:?}", timeout);
-
-                let mut sessman = sessman.lock().await;
-                sessman.mark_shutdown(&session_id);
-
                 return Ok(());
             }
             futures::future::Either::Right((Ok(haproxy_header), _timeout_fut)) => {
@@ -278,23 +346,9 @@ pub async fn sni_connect_and_copy(
             }
             futures::future::Either::Right((Err(err), _timeout_fut)) => {
                 event!(Level::WARN, "HaproxyHeader read error: {:?}", err);
-
-                let mut sessman = sessman.lock().await;
-                sessman.mark_shutdown(&session_id);
-
                 return Ok(());
             }
         }
-    }
-
-    {
-        let mut sessman = sessman.lock().await;
-        sessman.add_session(Session::new(
-            session_id,
-            Instant::now(),
-            client_addr.clone(),
-            holder,
-        ));
     }
 
     // let handshake_fut = async {
@@ -339,27 +393,14 @@ pub async fn sni_connect_and_copy(
         Ok(Ok(Ok(hostname))) => sni_hostname = Some(hostname),
         Ok(Ok(Err(err))) => {
             event!(Level::WARN, "ClientHello read error: {:?}", err);
-
-            // replace all these with a guard.
-            let mut sessman = sessman.lock().await;
-            sessman.mark_shutdown(&session_id);
-
             return Ok(());
         }
         Ok(Err(..)) => {
             event!(Level::WARN, "ClientHello read timed out - terminating");
-
-            let mut sessman = sessman.lock().await;
-            sessman.mark_shutdown(&session_id);
-
             return Ok(());
         }
         Err(()) => {
             event!(Level::WARN, "connection destroyed");
-
-            let mut sessman = sessman.lock().await;
-            sessman.mark_shutdown(&session_id);
-
             return Ok(());
         }
     };
@@ -384,6 +425,7 @@ pub async fn sni_connect_and_copy(
         }
     };
 
+
     assert_eq!(bset.locations.len(), 1);
 
     if let Some(haproxy_v) = bset.haproxy_header_version {
@@ -399,103 +441,103 @@ pub async fn sni_connect_and_copy(
         backend_write_buf.extend_from_slice(&tls_handshake[..])
     }
 
-    let backend_info = &bset.locations.iter().next().unwrap().1;
-    let mut backend = dial_backend(*backend_info).await?;
 
+    let backend_info = &bset.locations.iter().next().unwrap().1;
     {
         let mut sessman = sessman.lock().await;
         sessman.mark_backend_connecting(&session_id);
     }
+
+    let mut backend = dial_backend(*backend_info).await?;
 
     {
         let mut sessman = sessman.lock().await;
         sessman.mark_connected(&session_id);
     }
 
-    let (mut client_read, mut client_write) = client.split();
-    let (mut backend_read, mut backend_write) = backend.split();
 
-    let client_to_backend = async {
-        loop {
-            let length;
-            // skip reading in the first iteration, if we have data
-            if backend_write_buf.len() == 0 {
-                length = read_into(&mut client_read, &mut backend_write_buf).await?;
-            } else {
-                length = backend_write_buf.len();
+    let completion_fut = async move {
+        let mut client_read_open = true;
+        let mut backend_read_open = true;
+        let mut backend_to_write = backend_write_buf.split().freeze();
+        let mut client_to_write = client_write_buf.split().freeze();
+
+        let max_write_block_time = tokio::time::Duration::new(300, 0);
+        let max_read_block_time = tokio::time::Duration::new(1800, 0);
+        let mut wb_timer = tokio::time::delay_for(max_write_block_time);
+        let mut rb_timer = tokio::time::delay_for(max_read_block_time);
+
+        while backend_read_open || client_read_open {
+            if !backend_to_write.is_empty() || !client_to_write.is_empty() {
+                wb_timer.reset(tokio::time::Instant::now() + max_write_block_time);
+
+                tokio::select! {
+                    length = write_from(&mut backend, &mut backend_to_write), if !backend_to_write.is_empty() => {
+                        length?;
+                        continue;
+                    },
+                    length = write_from(&mut client, &mut client_to_write), if !client_to_write.is_empty() => {
+                        length?;            
+                        continue;
+                    }
+                    _ = &mut wb_timer => return Err(WriteTimeout.into()),
+                }
             }
 
-            let mut to_write = backend_write_buf.split().freeze();
+            rb_timer.reset(tokio::time::Instant::now() + max_read_block_time);
+            tokio::select! {
+                length = read_into(&mut backend, &mut client_write_buf), if backend_read_open => {
+                    let length = length?;
+                    if length == 0 {
+                        backend_read_open = false;
+                        let _ = client.shutdown(Shutdown::Write);
+                    }
 
-            if to_write.is_empty() {
-                // EOF was reached.
-                break;
-            }
-            while !to_write.is_empty() {
-                write_from(&mut backend_write, &mut to_write).await?;
-            }
+                    let mut sessman = sessman.lock().await;
+                    if length == 0 {
+                        sessman.mark_shutdown_read(&session_id);
+                    } else {
+                        sessman.handle_xmit_client_to_backend(&session_id, length as u64);
+                    }
+                    drop(sessman);
 
-            let mut sessman = sessman.lock().await;
-            sessman.handle_xmit_client_to_backend(&session_id, length as u64);
+                    assert!(client_to_write.is_empty());
+                    client_to_write = client_write_buf.split().freeze();
+                },
+                length = read_into(&mut client, &mut backend_write_buf), if client_read_open => {
+                    let length = length?;
+
+                    if length == 0 {
+                        client_read_open = false;
+                        backend.shutdown_write()?;
+                    }
+
+                    let mut sessman = sessman.lock().await;
+                    if length == 0 {
+                        sessman.mark_shutdown_write(&session_id);
+                    } else {
+                        sessman.handle_xmit_backend_to_client(&session_id, length as u64);
+                    }
+                    drop(sessman);
+
+                    assert!(backend_to_write.is_empty());
+                    backend_to_write = backend_write_buf.split().freeze();
+                },
+                _ = &mut rb_timer => {
+                    return Err(ReadTimeout { phase: ReadTimeoutPhase::Data }.into());
+                }
+            }
         }
 
-        backend_write.close_write()?;
+        Result::<(), failure::Error>::Ok(())
+    }.boxed();
 
-        let mut sessman = sessman.lock().await;
-        sessman.mark_shutdown_write(&session_id);
-
-        io::Result::Ok(())
-    };
-
-    let backend_to_client = async {
-        loop {
-            let length;
-            // skip reading in the first iteration, if we have data
-            if client_write_buf.len() == 0 {
-                length = read_into(&mut backend_read, &mut client_write_buf).await?;
-            } else {
-                length = client_write_buf.len();
-            }
-            let mut to_write = client_write_buf.split().freeze();
-
-            if to_write.is_empty() {
-                // EOF was reached.
-                break;
-            }
-            while !to_write.is_empty() {
-                write_from(&mut client_write, &mut to_write).await?;
-            }
-
-            let mut sessman = sessman.lock().await;
-            sessman.handle_xmit_backend_to_client(&session_id, length as u64);
-        }
-
-        io::Result::Ok(())
-    };
-
-    let mut force_destroy = false;
-    let completion_fut = future::join(client_to_backend, backend_to_client).boxed();
     match Pin::new(&mut canceler).await_with(completion_fut).await {
-        Ok((res1, res2)) => {
-            if let Err(err) = res1 {
-                event!(Level::INFO, "client-to-backend error: {:?}", err);
-                force_destroy = true;
-            }
-
-            if let Err(err) = res2 {
-                event!(Level::INFO, "backend-to-client error: {:?}", err);
-                force_destroy = true;
-            }
-        }
-        Err(()) => force_destroy = true,
-    }
-
-    let mut sessman = sessman.lock().await;
-    if force_destroy {
-        sessman.destroy(&session_id);
-    }
-    sessman.mark_shutdown(&session_id);
-
+        Ok(Ok(())) => (),
+        Ok(Err(err)) => return Err(err),
+        Err(()) => return Err(failure::format_err!("session adminstratively canceled")),
+    };
+    
     Ok(())
 }
 

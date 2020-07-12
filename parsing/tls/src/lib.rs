@@ -496,6 +496,12 @@ const TLS_EXTENSION_SIGNATURE_ALGORITHMS: ExtensionDef = ExtensionDef {
     name: "signature_algorithms",
 };
 
+const TLS_EXTENSION_APPLICATION_LAYER_PROTOCOL_NEGOTIATION_ID: u16 = 0x0010;
+const TLS_EXTENSION_APPLICATION_LAYER_PROTOCOL_NEGOTIATION: ExtensionDef = ExtensionDef {
+    id: TLS_EXTENSION_APPLICATION_LAYER_PROTOCOL_NEGOTIATION_ID,
+    name: "application_layer_protocol_negotiation",
+};
+
 const TLS_EXTENSION_ENCRYPT_THEN_MAC_ID: u16 = 0x0016;
 const TLS_EXTENSION_ENCRYPT_THEN_MAC: ExtensionDef = ExtensionDef {
     id: TLS_EXTENSION_ENCRYPT_THEN_MAC_ID,
@@ -538,6 +544,7 @@ pub fn tls_extension_lookup(id: u16) -> Option<ExtensionDef> {
         TLS_EXTENSION_SUPPORTED_GROUPS_ID => Some(TLS_EXTENSION_SUPPORTED_GROUPS),
         TLS_EXTENSION_EC_POINT_FORMATS_ID => Some(TLS_EXTENSION_EC_POINT_FORMATS),
         TLS_EXTENSION_SIGNATURE_ALGORITHMS_ID => Some(TLS_EXTENSION_SIGNATURE_ALGORITHMS),
+        TLS_EXTENSION_APPLICATION_LAYER_PROTOCOL_NEGOTIATION_ID => Some(TLS_EXTENSION_APPLICATION_LAYER_PROTOCOL_NEGOTIATION),
         TLS_EXTENSION_ENCRYPT_THEN_MAC_ID => Some(TLS_EXTENSION_ENCRYPT_THEN_MAC),
         TLS_EXTENSION_EXTENDED_MASTER_SECRET_ID => Some(TLS_EXTENSION_EXTENDED_MASTER_SECRET),
         TLS_EXTENSION_SESSION_TICKET_ID => Some(TLS_EXTENSION_SESSION_TICKET),
@@ -606,20 +613,75 @@ impl<'arena> ByteIterRead<'arena> for ExtensionServerName<'arena> {
         length <<= 8;
         length += *data.next().ok_or_else(Error::truncated)? as usize;
 
-        let mut server_name_data = iter_skip(length, data)?.iter();
-        let entry_number = size_server_name(&mut server_name_data.clone())?;
-
+        let mut ext_data = iter_skip(length, data)?.iter();
+        let entry_number = size_server_name(&mut ext_data.clone())?;
         let entries = alloc.alloc_slice_fn(entry_number, |_| ExtensionServerNameEntry(""));
         for e in entries.iter_mut() {
-            *e = ExtensionServerNameEntry::read_byte_iter(alloc, &mut server_name_data)?;
+            *e = ExtensionServerNameEntry::read_byte_iter(alloc, &mut ext_data)?;
         }
         Ok(ExtensionServerName(entries))
+    }
+}
+
+#[derive(Debug, Copy, Clone)]
+pub struct ExtensionAlpnEntry<'arena>(pub &'arena str);
+
+impl<'arena> ByteIterRead<'arena> for ExtensionAlpnEntry<'arena> {
+    type Error = Error;
+
+    fn read_byte_iter(
+        alloc: &mut Allocator<'arena>,
+        data: &mut slice::Iter<u8>,
+    ) -> Result<Self, Self::Error> {
+        let mut length: usize = 0;
+        length += *data.next().ok_or_else(Error::truncated)? as usize;
+
+        let host_name_bytes = alloc.alloc_slice(iter_skip(length, data)?);
+        let host_name =
+            std::str::from_utf8(host_name_bytes).map_err(|_| Error::protocol_violation())?;
+        Ok(ExtensionAlpnEntry(host_name))
+    }
+}
+
+#[derive(Debug, Copy, Clone)]
+pub struct ExtensionAlpn<'arena>(pub &'arena [ExtensionAlpnEntry<'arena>]);
+
+impl<'arena> ByteIterRead<'arena> for ExtensionAlpn<'arena> {
+    type Error = Error;
+
+    fn read_byte_iter(
+        alloc: &mut Allocator<'arena>,
+        data: &mut slice::Iter<u8>,
+    ) -> Result<Self, Self::Error> {
+        fn size_alpn(data: &mut slice::Iter<u8>) -> Result<usize, Error> {
+            let mut counter = 0;
+            while let Some(length) = data.next() {
+                let length = *length as usize;
+                iter_skip(length, data)?;
+                counter += 1;
+            }
+            Ok(counter)
+        }
+
+        let mut length: usize = 0;
+        length += *data.next().ok_or_else(Error::truncated)? as usize;
+        length <<= 8;
+        length += *data.next().ok_or_else(Error::truncated)? as usize;
+
+        let mut ext_data = iter_skip(length, data)?.iter();
+        let entry_number = size_alpn(&mut ext_data.clone())?;
+        let entries = alloc.alloc_slice_fn(entry_number, |_| ExtensionAlpnEntry(""));
+        for e in entries.iter_mut() {
+            *e = ExtensionAlpnEntry::read_byte_iter(alloc, &mut ext_data)?;
+        }
+        Ok(ExtensionAlpn(entries))
     }
 }
 
 #[derive(Copy, Clone)]
 pub enum Extension<'arena> {
     ServerName(&'arena ExtensionServerName<'arena>),
+    ApplicationLayerProtocolNegotiation(&'arena ExtensionAlpn<'arena>),
     Unknown(u16, &'arena [u8]),
 }
 
@@ -629,6 +691,11 @@ impl<'a> fmt::Debug for Extension<'a> {
         match self {
             Extension::ServerName(ch) => {
                 f.debug_tuple("ServerName")
+                   .field(&ch)
+                   .finish()
+            },
+            Extension::ApplicationLayerProtocolNegotiation(ch) => {
+                f.debug_tuple("ApplicationLayerProtocolNegotiation")
                    .field(&ch)
                    .finish()
             },
@@ -665,6 +732,11 @@ impl<'arena> ByteIterRead<'arena> for Extension<'arena> {
                 let mut ex_data_iter = ex_data.iter();
                 let server_name = ExtensionServerName::read_byte_iter(alloc, &mut ex_data_iter)?;
                 Ok(Extension::ServerName(alloc.alloc(server_name)))
+            },
+            TLS_EXTENSION_APPLICATION_LAYER_PROTOCOL_NEGOTIATION_ID => {
+                let mut ex_data_iter = ex_data.iter();
+                let alpn = ExtensionAlpn::read_byte_iter(alloc, &mut ex_data_iter)?;
+                Ok(Extension::ApplicationLayerProtocolNegotiation(alloc.alloc(alpn)))
             }
             _ => Ok(Extension::Unknown(ex_type, alloc.alloc_slice(ex_data))),
         }
@@ -705,7 +777,9 @@ impl<'arena> ByteIterRead<'arena> for Extensions<'arena> {
         length += *data.next().ok_or_else(Error::truncated)? as usize;
 
         let mut extensions = iter_skip(length, data)?.iter();
+
         let length = size_extensions(&mut extensions.clone())?;
+
         let ex_entries = alloc.alloc_slice_fn(length, |_| Extension::Unknown(0, &[]));
         for e in ex_entries.iter_mut() {
             *e = ByteIterRead::read_byte_iter(alloc, &mut extensions)?;
@@ -718,8 +792,42 @@ pub const RECORD_CONTENT_TYPE_HANDSHAKE: u8 = 22;
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_record, ByteIterRead, Handshake, RECORD_CONTENT_TYPE_HANDSHAKE};
+    use super::{extract_record, ByteIterRead, Handshake, ExtensionServerName, ExtensionAlpn, RECORD_CONTENT_TYPE_HANDSHAKE};
     use copy_arena::Arena;
+
+    #[test]
+    fn test_sni_decode() {
+        let bytes: &[u8] = b"\0\x0e\0\0\x0bexample.com";
+
+        let mut arena = copy_arena::Arena::new();
+        let mut allocator = arena.allocator();
+
+        let ext = ExtensionServerName::read_byte_iter(&mut allocator, &mut bytes.iter()).unwrap();
+        assert_eq!(&ext.0[0].0[..], "example.com");
+    }
+
+    #[test]
+    fn test_alpn_decode_single() {
+        let bytes: &[u8] = b"\0\x0b\nacme-tls/1";
+
+        let mut arena = copy_arena::Arena::new();
+        let mut allocator = arena.allocator();
+
+        let ext = ExtensionAlpn::read_byte_iter(&mut allocator, &mut bytes.iter()).unwrap();
+        assert_eq!(&ext.0[0].0[..], "acme-tls/1");
+    }
+
+    #[test]
+    fn test_alpn_decode_multiple() {
+        let bytes: &[u8] = b"\0\x0c\x02h2\x08http/1.1";
+
+        let mut arena = copy_arena::Arena::new();
+        let mut allocator = arena.allocator();
+
+        let ext = ExtensionAlpn::read_byte_iter(&mut allocator, &mut bytes.iter()).unwrap();
+        assert_eq!(&ext.0[0].0[..], "h2");
+        assert_eq!(&ext.0[1].0[..], "http/1.1");
+    }
 
     const EXAMPLE_1: &[u8] = b"\x16\x03\x01\x02q\x01\x00\x02m\x03\x03\x0c\x88\xc1\xc4F\xba\xfb\"y\xdf\x9f\x8f\xee/!b\x06i\n=q\x04/\xe6\";\xb4\x10\x9c\x96\x13m f\xee\xafs\xb9sn\x90\t\xe8\x87\x16\x043T\xb6\xbc%/l\xdd\xe1\x10\xf6\x18S\x07\x17\xb3I\\\xc9\x00$\x13\x01\x13\x03\x13\x02\xc0+\xc0/\xcc\xa9\xcc\xa8\xc0,\xc00\xc0\n\xc0\t\xc0\x13\xc0\x14\x003\x009\x00/\x005\x00\n\x01\x00\x02\x00\x00\x00\x00\x13\x00\x11\x00\x00\x0ewww.google.com\x00\x17\x00\x00\xff\x01\x00\x01\x00\x00\n\x00\x0e\x00\x0c\x00\x1d\x00\x17\x00\x18\x00\x19\x01\x00\x01\x01\x00\x0b\x00\x02\x01\x00\x00\x10\x00\x0e\x00\x0c\x02h2\x08http/1.1\x00\x05\x00\x05\x01\x00\x00\x00\x00\x003\x00k\x00i\x00\x1d\x00 XN\x1e},\xf0\x16\xe4\x8b\xc5\xf0rl\x07\xbd\xf7\x1c\xa04\xdc\x9a\x02m\xee\xe7\x03N\x7f\x91\x07\xf3k\x00\x17\x00A\x047\x9bGE]p\x14\x7f.\xff\x8fj\x1fN\xb6\xaa\xebk\x15 \x02\x7f\x1f\x8dW\'^\x18\xd7 +0\xd3\xc6)0\x04\xacT\x9f\xcf\xfcr\x12`\x19\xc6wXw\xe1\x90\x14\xfa\xab\xb8\xbf\xc8\xdd3\x80\xec\xb8{\x00+\x00\t\x08\x03\x04\x03\x03\x03\x02\x03\x01\x00\r\x00\x18\x00\x16\x04\x03\x05\x03\x06\x03\x08\x04\x08\x05\x08\x06\x04\x01\x05\x01\x06\x01\x02\x03\x02\x01\x00-\x00\x02\x01\x01\x00\x1c\x00\x02@\x01\x00)\x01\x05\x00\xe0\x00\xda\x00\xf1\xa5d\xfe\xf1R\xdd\xf8\xcf\xb8]\xd0N\xf4[6\xca \x9aG\x9ck\xd8\xb5P\xe0\x10?(\x1aI\x96\t\x87\xc8d\x91s\xd9\x96@\xf3`\xed#\xb9*j\xc1\x94[\x19\xb3\xca&\x10!~\xc5{\x06~\xe0 \xf6p\xb2\xa1\x12\xb5,\xaf\x98\xdf\x94\xda\x15\xe8\xa1\xe7,\x9e\xc2\x0e\x83\xb6\x10\xc0\xd5\x87\xc6P,\xfe<~\xf2\xd5\xbd\xc43\x9d\x9e\x1f\x13\xa6B\x1c\x8b\xdc\xa5{\xb9\x86Y\xe7\x10\xe7J\xfa!e\xb8\xb6#\x00\xb1*\x99\x7ff\x03\xd0\xcb1V\x91\xb24\xd4\xc4q\x053\x01\x04I\xae\xa9\xc5\x80\xef\xa0 c\x08\xb9m\x93\x9a\xd0k%[! 2\xd7\x08T\x8a\x03u\xce.\xf1\xbd\x9e\x04L\x06_,;\xd2r\x94\xe7\xec\xb5\xf8h\xa3\xb7\x8d\x8f\x05\xcd\x9a\xcd\xad68\xe0\xae\x0c\x97\x98\xcd\x89Kh\'K\x1a\x8eFB,r*\x00! \x92\xac\xb6\x99{CN\xcb6Q\xa5\xd1(\x8dE\xed-\xa9\xb1S\xcaO\x0e\\e\r\x89<\xad\xf5S*";
 
@@ -756,7 +864,6 @@ mod tests {
         let handshake =
             Handshake::read_byte_iter(&mut allocator, &mut unframed_data.iter()).unwrap();
         println!("{:?}", handshake);
-        panic!();
     }
 }
 
