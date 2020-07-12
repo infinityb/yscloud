@@ -349,8 +349,10 @@ where
             }
         }
 
-        if read_into(&mut socket, &mut read_buf).await? == 0 {
-            break;
+        if read_buf.is_empty() {
+            if read_into(&mut socket, &mut read_buf).await? == 0 {
+                break;
+            }
         }
 
         let request = match decode_ascii_manager_request(&mut read_buf) {
