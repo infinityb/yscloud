@@ -392,16 +392,13 @@ pub async fn sni_connect_and_copy_helper(
     {
         Ok(Ok(Ok(hostname))) => sni_hostname = Some(hostname),
         Ok(Ok(Err(err))) => {
-            event!(Level::WARN, "ClientHello read error: {:?}", err);
-            return Ok(());
+            return Err(failure::format_err!("ClientHello read error: {:?}", err));
         }
         Ok(Err(..)) => {
-            event!(Level::WARN, "ClientHello read timed out - terminating");
-            return Ok(());
+            return Err(ReadTimeout { phase: ReadTimeoutPhase::TlsHeader }.into());
         }
         Err(()) => {
-            event!(Level::WARN, "connection destroyed");
-            return Ok(());
+            return Err(failure::format_err!("session adminstratively canceled"));
         }
     };
 
@@ -413,19 +410,7 @@ pub async fn sni_connect_and_copy_helper(
     }
 
     event!(Level::INFO, "looking up SNI name: {:?}", sni_hostname);
-    let bset = match backend_man.resolve(&sni_hostname).await {
-        Ok(bset) => bset,
-        Err(err) => {
-            event!(Level::WARN, "unimplemented - sending TLS error: {:?}", err);
-
-            let mut sessman = sessman.lock().await;
-            sessman.mark_shutdown(&session_id);
-
-            return Ok(());
-        }
-    };
-
-
+    let bset = backend_man.resolve(&sni_hostname).await?;
     assert_eq!(bset.locations.len(), 1);
 
     if let Some(haproxy_v) = bset.haproxy_header_version {
@@ -444,15 +429,15 @@ pub async fn sni_connect_and_copy_helper(
 
     let backend_info = &bset.locations.iter().next().unwrap().1;
     {
-        let mut sessman = sessman.lock().await;
-        sessman.mark_backend_connecting(&session_id);
+        let mut locked = sessman.lock().await;
+        locked.mark_backend_connecting(&session_id);
     }
 
     let mut backend = dial_backend(*backend_info).await?;
 
     {
-        let mut sessman = sessman.lock().await;
-        sessman.mark_connected(&session_id);
+        let mut locked = sessman.lock().await;
+        locked.mark_connected(&session_id);
     }
 
 
