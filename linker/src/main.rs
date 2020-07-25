@@ -56,40 +56,22 @@ fn main() {
         .subcommand(start_daemon::get_subcommand())
         .get_matches();
 
-    let mut print_test_logging = false;
+    let verbosity = matches.occurrences_of("v");
+    let should_print_test_logging = 4 < verbosity;
 
-    let mut verbosity = matches.occurrences_of("v");
-    let debugging = matches.occurrences_of("d");
-    if verbosity < debugging {
-        verbosity = debugging;
-    }
-    if 4 < verbosity {
-        print_test_logging = true;
-    }
-
-    match verbosity {
-        0 => {
-            my_subscriber_builder = my_subscriber_builder.with_max_level(TracingLevelFilter::ERROR)
-        }
-        1 => my_subscriber_builder = my_subscriber_builder.with_max_level(TracingLevelFilter::WARN),
-        2 => my_subscriber_builder = my_subscriber_builder.with_max_level(TracingLevelFilter::INFO),
-        3 => {
-            my_subscriber_builder = my_subscriber_builder.with_max_level(TracingLevelFilter::DEBUG)
-        }
-        _ => {
-            my_subscriber_builder = my_subscriber_builder.with_max_level(TracingLevelFilter::TRACE)
-        }
-    };
+    my_subscriber_builder = my_subscriber_builder.with_max_level(match verbosity {
+        0 => TracingLevelFilter::ERROR,
+        1 => TracingLevelFilter::WARN,
+        2 => TracingLevelFilter::INFO,
+        3 => TracingLevelFilter::DEBUG,
+        _ => TracingLevelFilter::TRACE,
+    });
 
     tracing::subscriber::set_global_default(my_subscriber_builder.finish())
         .expect("setting tracing default failed");
 
-    if print_test_logging {
-        event!(Level::TRACE, "logger initialized - trace check");
-        event!(Level::DEBUG, "logger initialized - debug check");
-        event!(Level::INFO, "logger initialized - info check");
-        event!(Level::WARN, "logger initialized - warn check");
-        event!(Level::ERROR, "logger initialized - error check");
+    if should_print_test_logging {
+        print_test_logging();
     }
 
     let (sub_name, args) = matches.subcommand();
@@ -135,3 +117,14 @@ pub struct ExecSomething {
     extras: ExecExtras,
     cfg: AppPreforkConfiguration,
 }
+
+
+#[allow(clippy::cognitive_complexity)] // macro bug around event!()
+fn print_test_logging() {
+    event!(Level::TRACE, "logger initialized - trace check");
+    event!(Level::DEBUG, "logger initialized - debug check");
+    event!(Level::INFO, "logger initialized - info check");
+    event!(Level::WARN, "logger initialized - warn check");
+    event!(Level::ERROR, "logger initialized - error check");
+}
+

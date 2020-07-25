@@ -62,63 +62,6 @@ struct PackageKey {
     version: Version,
 }
 
-// fn fetch_component_metadata<'a>(
-//     dm: &'a DeploymentManifest,
-// ) -> Fallible<HashMap<PackageKey<'a>, &'a DeployedApplicationManifest>> {
-//     let dm: DeploymentManifest = dm.clone();
-
-//     let mut reg_futures: Vec<
-//         Pin<Box<dyn Future<Output = Fallible<(PackageKey, RegistryEntry)>> + Send>>,
-//     > = Vec::new();
-
-//     for component in &dm.components {
-//         if dm.path_overrides.get(&component.package_id).is_none() {
-
-//             let component_version = component.version.clone();
-//             let component_package_id = component.package_id.clone();
-
-//             let triple_to_sha256 = HashMap::new();
-//             triple_to_sha256.insert((), ());
-
-//             RegistryEntry {
-//                 version: component.version.clone(),
-//                 sha256s: triple_to_sha256,
-//                 manifest:
-//             }
-
-//             reg_futures.push(
-//                 async move {
-//                     let component_req = VersionReq::exact(&component_version);
-
-//                     RegistryEntry {
-//                         version: component_version.clone(),
-//                         sha256s:
-//                     }
-//                     let entry = reg_clone
-//                         .find_best_entry_for_version(&component_package_id, &component_req)
-//                         .await?;
-
-//                     Ok((
-//                         PackageKey {
-//                             package_id: component_package_id,
-//                             version: component_version,
-//                         },
-//                         entry,
-//                     ))
-//                 }
-//                     .boxed(),
-//             );
-//         }
-//     }
-
-//     let out: HashMap<_, _> = futures::future::try_join_all(reg_futures)
-//         .await?
-//         .into_iter()
-//         .collect();
-
-//     Ok(out)
-// }
-
 async fn download_components(
     cfg: &Config,
     dm: &DeploymentManifest,

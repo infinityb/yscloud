@@ -11,14 +11,14 @@ use socket2::Socket;
 use tokio::io::PollEvented;
 use tokio::io::{AsyncRead, AsyncWrite};
 
-macro_rules! ready {
-    ($e:expr $(,)?) => {
-        match $e {
-            std::task::Poll::Ready(t) => t,
-            std::task::Poll::Pending => return std::task::Poll::Pending,
-        }
-    };
-}
+// macro_rules! ready {
+//     ($e:expr $(,)?) => {
+//         match $e {
+//             std::task::Poll::Ready(t) => t,
+//             std::task::Poll::Pending => return std::task::Poll::Pending,
+//         }
+//     };
+// }
 
 struct StreamSocketInner(Socket);
 

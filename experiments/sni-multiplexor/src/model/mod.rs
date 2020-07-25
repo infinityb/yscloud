@@ -169,22 +169,36 @@ impl SocketAddrPair {
 pub enum NetworkLocationAddress {
     Unix(PathBuf),
     Tcp(SocketAddr),
+    Hostname(String),
+    Srv(String),
 }
 
 impl std::str::FromStr for NetworkLocationAddress {
-    type Err = Error;
+    type Err = Box<dyn std::error::Error>;
 
     fn from_str(from: &str) -> Result<Self, Self::Err> {
-        println!("parsing {:?}", from);
+        const UNIX_PREFIX: &str = "unix:";
+        const DNS_PREFIX: &str = "dns:";
+
+        if from.starts_with(UNIX_PREFIX) {
+            let path = PathBuf::from(&from[UNIX_PREFIX.len()..]);
+            return Ok(NetworkLocationAddress::Unix(path));
+        }
+
+        if from.starts_with(DNS_PREFIX) {
+            let name = &from[DNS_PREFIX.len()..];
+            return Ok(NetworkLocationAddress::Hostname(name.to_string()));
+        }
+
         if let Ok(sa) = from.parse::<SocketAddr>() {
             return Ok(NetworkLocationAddress::Tcp(sa));
         }
 
-        if from.starts_with("/") {
+        if from.chars().any(|x| x == '/') {
             return Ok(NetworkLocationAddress::Unix(PathBuf::from(from)));
         }
 
-        Err(InvalidNetworkLocationAddress.into())
+        Ok(NetworkLocationAddress::Hostname(from.to_string()))
     }
 }
 

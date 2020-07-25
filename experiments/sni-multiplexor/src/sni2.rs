@@ -1,10 +1,13 @@
+use std::convert::{TryInto, TryFrom};
+use std::fmt;
 use std::io;
+use std::net::Shutdown;
+use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Instant;
-use std::net::Shutdown;
-use std::fmt;
+use std::borrow::Cow;
 
 use bytes::{Bytes, BytesMut};
 use copy_arena::{Allocator, Arena};
@@ -18,6 +21,8 @@ use socket_traits::{AsyncWriteClose, DynamicSocket, Socket};
 use tls::decode_client_hello;
 use tokio::sync::Mutex;
 use tracing::{event, Level};
+use trust_dns_resolver::TokioAsyncResolver;
+use failure::format_err;
 
 use crate::context;
 use crate::ioutil::{read_into, write_from, BinStr};
@@ -250,20 +255,87 @@ where
     }
 }
 
-async fn dial_backend(addr: &NetworkLocationAddress) -> io::Result<DynamicSocket> {
-    match *addr {
-        NetworkLocationAddress::Unix(ref path) => {
-            let sock = UnixStream::connect(path).await?;
-            Ok(sock.into())
-        }
-        NetworkLocationAddress::Tcp(ref addr) => {
-            let sock = TcpStream::connect(addr).await?;
-            Ok(sock.into())
+
+pub struct Dialer {
+    pub resolver: TokioAsyncResolver,
+    // backend_circuit_breakers: HashMap<IpAddr, Instant>.
+}
+
+#[derive(Debug)]
+struct NetLoc<'a> {
+    pub host: Cow<'a, str>,
+    pub port: u16,
+}
+
+impl<'a> TryFrom<&'a str> for NetLoc<'a> {
+    type Error = failure::Error;
+
+    fn try_from(s: &'a str) -> Result<NetLoc<'a>, Self::Error> {
+        let mut parts_iter = s.rsplitn(2, ':');
+        let port_str = parts_iter.next().unwrap();
+        let host = parts_iter.next().ok_or_else(|| {
+            format_err!("invalid network location {:?}: invalid socket address, missing port?", s)
+        })?;
+        let port = match port_str.parse() {
+            Ok(port) => port,
+            Err(err) => {
+                return Err(format_err!("invalid network location {:?}: invalid socket address, bad port: {}", s, err));
+            }
+        };
+
+        Ok(NetLoc { host: host.into(), port })
+    }
+}
+
+impl Dialer {
+    pub fn dial<'a>(&'a self, addr: &NetworkLocationAddress) -> impl Future<Output=Result<DynamicSocket, failure::Error>> + 'a {
+        let addr: NetworkLocationAddress = addr.clone();
+        async move {
+            match addr {
+                NetworkLocationAddress::Unix(ref path) => {
+                    let sock = UnixStream::connect(path).await?;
+                    Ok(sock.into())
+                }
+                NetworkLocationAddress::Tcp(ref addr) => {
+                    let sock = TcpStream::connect(addr).await?;
+                    Ok(sock.into())
+                }
+                NetworkLocationAddress::Hostname(ref addr) => {
+                    let nl: NetLoc = addr[..].try_into()?;
+                    let response = self.resolver.lookup_ip(&nl.host[..]).await?;
+                    let mut response_iter = response.iter();
+                    while let Some(v) = response_iter.next() {
+                        let addr = SocketAddr::new(v, nl.port);
+                        let sock = TcpStream::connect(addr).await?;
+                        return Ok(sock.into())
+                    }
+
+                    Err(format_err!("no IPs found for {}", nl.host))
+                }
+                NetworkLocationAddress::Srv(ref addr) => {
+                    // TODO: use weights
+                    let srv_response = self.resolver.srv_lookup(&addr[..]).await?;
+                    let mut srv_response_iter = srv_response.iter();
+                    while let Some(srv_v) = srv_response_iter.next() {
+                        let ip_response = self.resolver.lookup_ip(srv_v.target().clone()).await?;
+                        let mut ip_response_iter = ip_response.iter();
+
+                        while let Some(ip_v) = ip_response_iter.next() {
+                            let addr = SocketAddr::new(ip_v, srv_v.port());
+                            let sock = TcpStream::connect(addr).await?;
+                            return Ok(sock.into());
+                        }
+                    }
+
+                    Err(format_err!("no IPs found for {}", addr))
+                }
+            }
         }
     }
 }
 
 pub async fn sni_connect_and_copy(
+    dialer: Arc<Dialer>,
     sessman: Arc<Mutex<SessionManager>>,
     backend_man: Arc<Mutex<BackendManager>>,
     client_addr: SocketAddrPair,
@@ -285,6 +357,7 @@ pub async fn sni_connect_and_copy(
     drop(sessman_locked);
 
     let res = sni_connect_and_copy_helper(
+        dialer,
         sessman.clone(), session_id, backend_man,
         client_addr, client, client_ctx, canceler,
     ).await;
@@ -303,6 +376,7 @@ pub async fn sni_connect_and_copy(
 }
 
 pub async fn sni_connect_and_copy_helper(
+    dialer: Arc<Dialer>,
     sessman: Arc<Mutex<SessionManager>>,
     session_id: Ksuid,
     backend_man: Arc<Mutex<BackendManager>>,
@@ -351,38 +425,6 @@ pub async fn sni_connect_and_copy_helper(
         }
     }
 
-    // let handshake_fut = async {
-    //     if let Some(haproxy_v) = client_ctx.proxy_header_version {
-    //         match read_haproxy_header(haproxy_v, &mut client, &mut backend_write_buf).await {
-    //             Ok(haproxy_header) => {
-    //                 let haproxy_header: Header = haproxy_header;
-
-    //                 //
-    //             }
-    //             Err(err) => {
-    //                 event!(Level::WARN, "HaproxyHeader read error: {:?}", err);
-    //                 return false;
-    //             }
-    //         }
-    //     }
-
-    //     match read_client_hello_sni(&mut client, &mut backend_write_buf).await {
-    //         Ok(hostname) => sni_hostname = hostname,
-    //         Err(err) => {
-    //             event!(Level::WARN, "ClientHello read error: {:?}", err);
-    //             return false;
-    //         }
-    //     }
-
-    //     true
-    // };
-    // if timeout_and_context_done(handshake_fut).await {
-    //     // replace all these with a guard?
-    //     let mut sessman = sessman.lock().await;
-    //     sessman.mark_shutdown(&session_id);
-
-    //     return Ok(())
-    // }
     match Pin::new(&mut canceler)
         .await_with(timeout(
             client_hello_timeout,
@@ -426,14 +468,14 @@ pub async fn sni_connect_and_copy_helper(
         backend_write_buf.extend_from_slice(&tls_handshake[..])
     }
 
-
     let backend_info = &bset.locations.iter().next().unwrap().1;
     {
         let mut locked = sessman.lock().await;
         locked.mark_backend_connecting(&session_id);
     }
 
-    let mut backend = dial_backend(*backend_info).await?;
+    event!(Level::INFO, "dialing {:?}", backend_info);
+    let mut backend = dialer.dial(*backend_info).await?;
 
     {
         let mut locked = sessman.lock().await;

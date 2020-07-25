@@ -17,6 +17,8 @@ use yscloud_config_model::{AppConfiguration, FileDescriptorRemote, SocketFlag};
 use tracing::{event, Level};
 use tracing_subscriber::filter::LevelFilter as TracingLevelFilter;
 use tracing_subscriber::FmtSubscriber;
+use trust_dns_resolver::TokioAsyncResolver;
+use trust_dns_resolver::config::{ResolverConfig, ResolverOpts};
 
 mod context;
 mod dialer;
@@ -38,12 +40,13 @@ use self::model::{
 };
 use self::resolver::BackendManager;
 use self::state_track::SessionManager;
+use self::sni2::Dialer;
 
 const CARGO_PKG_VERSION: &str = env!("CARGO_PKG_VERSION");
 const CARGO_PKG_NAME: &str = env!("CARGO_PKG_NAME");
 
 #[tokio::main]
-async fn main() {
+async fn main() -> Result<(), failure::Error> {
     let mut my_subscriber_builder = FmtSubscriber::builder();
 
     let matches = App::new("sni-director")
@@ -192,6 +195,20 @@ async fn main() {
     })).await.unwrap();
 
     let client_futures_tx_clone = client_futures_tx.clone();
+
+    let mut resolver_config = ResolverConfig::new();
+    resolver_config.add_name_server(trust_dns_resolver::config::NameServerConfig {
+        socket_addr: resolver_init.upstream_dns,
+        protocol: trust_dns_resolver::config::Protocol::Tcp,
+        tls_dns_name: None,
+    });
+    let resolver: TokioAsyncResolver = TokioAsyncResolver::tokio(
+        resolver_config,
+        ResolverOpts::default(),
+    ).await?;
+
+    let dialer = Arc::new(Dialer { resolver });
+
     client_futures_tx.send(tokio::spawn(async move {
         let mut client_futures_tx = client_futures_tx_clone;
 
@@ -216,6 +233,7 @@ async fn main() {
                 }
             };
             
+            let dialer = Arc::clone(&dialer);
             let data_sessman = Arc::clone(&data_sessman);
             let data_resolver = Arc::clone(&data_resolver);
             let join = tokio::spawn(async move {
@@ -235,6 +253,7 @@ async fn main() {
                 };
 
                 let res = sni2::sni_connect_and_copy(
+                    dialer,
                     data_sessman,
                     data_resolver,
                     client_conn,
@@ -268,6 +287,8 @@ async fn main() {
             event!(Level::WARN, "task exited uncleanly: {:?}", err);
         }
     }
+
+    Ok(())
 }
 
 

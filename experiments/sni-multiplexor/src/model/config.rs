@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::net::SocketAddr;
 
 use ksuid::Ksuid;
 use serde::{Deserialize, Serialize};
@@ -31,4 +32,5 @@ impl From<ConfigBackend> for BackendSet {
 #[derive(Serialize, Deserialize, Debug)]
 pub struct ConfigResolverInit {
     pub hostnames: HashMap<String, ConfigBackend>,
+    pub upstream_dns: SocketAddr,
 }

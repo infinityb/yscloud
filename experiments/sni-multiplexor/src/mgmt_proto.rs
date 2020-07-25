@@ -339,7 +339,7 @@ where
     let mut held_backends: BTreeSet<(String, Ksuid)> = BTreeSet::new();
     let mut running = true;
     
-    while running {
+    loop {
         if !to_write.is_empty() {
             if write_from(&mut socket, &mut to_write).await? == 0 {
                 running = false;
@@ -347,36 +347,34 @@ where
             continue;
         }
 
+        if !running {
+            break;
+        }
+
         if read_into(&mut socket, &mut read_buf).await? == 0 {
             running = false;
         }
-
-        loop {
-            event!(Level::INFO, "read_buf={:?}", read_buf);
-            let request = match decode_ascii_manager_request(&mut read_buf) {
-                Ok(Some(v)) => v,
-                Ok(None) => break,
-                Err(err) => {
-                    if let Some(mgmt_err) = err.downcast_ref::<MgmtProtocolError>() {
-                        if mgmt_err.recoverable {
-                            let item =
-                                AsciiManagerResponse::GenericError(Cow::Borrowed(&mgmt_err.message));
-                            encode_ascii_manager_response(&item, &mut write_buf)?;
-                            to_write = write_buf.split().freeze();
-                            continue;
-                        }
-                    }
-                    return Err(err);
+        match decode_ascii_manager_request(&mut read_buf) {
+            Ok(Some(request)) => {
+                if let AsciiManagerRequest::Quit = request {
+                    running = false;
+                } else {
+                    let response = handle_query(&sessman, &backends, request, &mut held_backends).await?;
+                    encode_ascii_manager_response(&response, &mut write_buf)?;
+                    to_write = write_buf.split().freeze();
                 }
-            };
-
-            if let AsciiManagerRequest::Quit = request {
-                running = false;
+            },
+            Ok(None) => break,
+            Err(err) => {
+                if let Some(mgmt_err) = err.downcast_ref::<MgmtProtocolError>() {
+                    let item = AsciiManagerResponse::GenericError(Cow::Borrowed(&mgmt_err.message));
+                    if mgmt_err.recoverable {
+                        encode_ascii_manager_response(&item, &mut write_buf)?;
+                        to_write = write_buf.split().freeze();
+                    }
+                }
+                return Err(err);
             }
-
-            let response = handle_query(&sessman, &backends, request, &mut held_backends).await?;
-            encode_ascii_manager_response(&response, &mut write_buf)?;
-            to_write = write_buf.split().freeze();
         }
     }
 
@@ -390,7 +388,7 @@ where
         }
     }
 
-    event!(Level::INFO, "mgmt client close completed");
+    event!(Level::DEBUG, "mgmt client close completed");
 
     Ok(())
 }

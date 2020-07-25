@@ -1,5 +1,9 @@
 [workspace]
 members = [
+	"boss/bencode",
+	"boss/magnetite-common",
+	"boss/vfshost",
+	"boss/webserver",
 	"experiments/esockets",
 	"experiments/linkerclient",
 	"experiments/sni-multiplexor",
@@ -11,10 +15,6 @@ members = [
 	"ksuid",
 	"ksuid/cli",
 	"linker",
-	"magnetite/bencode",
-	"magnetite/magnetite-common",
-	"magnetite/vfshost",
-	"magnetite/webserver",
 	"parsing/tls",
 	"webserver",
 	"yscloud-config-model",

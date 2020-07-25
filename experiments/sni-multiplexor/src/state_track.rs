@@ -72,7 +72,7 @@ impl Session {
             holder: Some(holder),
             exportable: SessionExport {
                 session_id,
-                start_time: start_time,
+                start_time,
                 client_conn: client_addr,
                 backend_name: None,
                 // backend_conn: None,

@@ -8,7 +8,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use std::net::{Ipv4Addr, Ipv6Addr};
 
-use log::info;
 use futures::future;
 use rand::seq::SliceRandom;
 use serde::{Deserialize, Serialize};
@@ -16,7 +15,8 @@ use ksuid::Ksuid;
 use smallvec::{self, SmallVec};
 use tokio::sync::Mutex;
 
-use crate::sni_base::ALERT_UNRECOGNIZED_NAME;
+use crate::model::{NetworkLocationAddress, HaproxyProxyHeaderVersion};
+use crate::error::tls::ALERT_UNRECOGNIZED_NAME;
 
 const BACKEND_CANDIDATE_STACK_COUNT: usize = 8;
 const DEFAULT_ATTEMPT_SCALING_FACTOR: Duration = Duration::from_secs(1);
@@ -96,7 +96,7 @@ fn backend_manager_lookup_best_backends<'backend>(
 }
 
 pub struct Backend {
-    use_haproxy_header_v: HaproxyProxyVersion,
+    use_haproxy_header_v: HaproxyProxyHeaderVersion,
     address_resolvable: BackendAddressResolvable,
     
     next_address_update: Instant,
@@ -179,32 +179,12 @@ impl Default for BackendStatistics {
     }
 }
 
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct NetworkLocation {
-    pub use_haproxy_header_v: bool,
-    pub address: NetworkLocationAddress,
-    pub stats: (),
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum NetworkLocationAddress {
-    Unix(PathBuf),
-    Tcp(SocketAddr),
-    Hostname(String),
-}
-
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "snake_case")]
 pub struct BackendSet {
     pub locations: BTreeMap<Ksuid, NetworkLocation>,
 }
 
-#[test]
-fn f() {
-    //
-}
 
 #[test]
 fn synchronous_in_memory_resolver() {
@@ -254,24 +234,6 @@ impl BackendSet {
         }
 
         BackendSet { locations }
-    }
-}
-
-impl std::str::FromStr for NetworkLocationAddress {
-    type Err = Box<dyn std::error::Error>;
-
-    fn from_str(from: &str) -> Result<Self, Self::Err> {
-        if let Ok(sa) = from.parse::<SocketAddr>() {
-            return Ok(NetworkLocationAddress::Tcp(sa));
-        }
-
-        if from.starts_with("/") {
-            return Ok(NetworkLocationAddress::Unix(PathBuf::from(from)));
-        }
-
-        Ok(NetworkLocationAddress::Hostname(from.to_string()))
-
-        // Err("must be a valid unix path starting with `/`, hostname, or SocketAddr".into())
     }
 }
 
