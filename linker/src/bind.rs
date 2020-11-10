@@ -62,7 +62,7 @@ pub fn bind_unix_socket(ub: &UnixDomainBinder) -> io::Result<OwnedFd> {
             unlink(&ub.path).map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
         }
         bind(fd.as_raw_fd(), &SockAddr::Unix(addr))
-            .map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
+            .map_err(|err| io::Error::new(io::ErrorKind::Other, format!("{}: {}", ub.path.display(), err)))?;
     }
 
     if ub.start_listen {

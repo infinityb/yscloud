@@ -9,6 +9,7 @@ members = [
 	"experiments/sni-multiplexor",
 	"experiments/socket-traits",
 	"experiments/sockets",
+	"experiments/sdf-dns",
 	"infra/cloudsafe",
 	"infra/memfd",
 	"infra/owned_fd",
@@ -17,5 +18,7 @@ members = [
 	"linker",
 	"parsing/tls",
 	"webserver",
+	"webserver/hello-world",
 	"yscloud-config-model",
+	"tonic/linker-connector",
 ]

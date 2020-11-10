@@ -80,7 +80,6 @@ async fn resolve(
     template: &ApplicationDeploymentTemplate,
 ) -> Fallible<DeploymentManifest> {
     let mut out = DeploymentManifest {
-        tenant_id: template.tenant_id.clone(),
         deployment_name: template.deployment_name.clone(),
         public_services: Vec::new(),
         components: Vec::new(),
@@ -276,6 +275,53 @@ mod tests {
             },
         );
         let registry = RegistryShared::shared(registry);
+
+        let xx = serde_json::from_str(r#"{
+            "deployment_name": "aibi.yshi.org",
+            "public_services": [
+                {
+                    "service_name": "org.yshi.sfshost.https",
+                    "binder": {
+                        "native_port_binder": {
+                          "bind_address": "::",
+                          "port": 1443
+                        }
+                    }
+                }
+            ],
+            "service_implementations": {
+                "org.yshi.log_target.v1.LogTarget": {
+                    "package_id": "org.yshi.file-logger",
+                    "version_req": "^1.0"
+                },
+                "org.yshi.sfshost.https": {
+                    "package_id": "org.yshi.sfshost.https",
+                    "version_req": "^1.0"
+                }
+            },
+            "configuration": {
+                "org.yshi.sfshost": {
+                    "vhosts": {
+                        "localhost": {
+                            "directory": "./test",
+                            "password": "foobar"
+                        },
+                        "localhost:1443": {
+                            "directory": "./test",
+                            "password": "foobar"
+                        }
+                    }
+                }
+            },
+            "sandbox": {
+                "org.yshi.sfshost": {
+                    "unix_user_confinement": [
+                        "sfs-aibi-log",
+                        "sfs-aibi-log"
+                    ]
+                }
+            }
+        }"#).unwrap();
 
         let template = ApplicationDeploymentTemplate {
             deployment_name: "example-deployment".into(),

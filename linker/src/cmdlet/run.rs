@@ -114,7 +114,8 @@ fn reify_service_connections(
                 component.package_id,
                 path
             );
-            direct_load_artifact(&path)?
+            direct_load_artifact(&path)
+                .map_err(|e| format!("error opening {}: {}", path, e))?
         } else {
             find_artifact(artifact_path, &component.package_id, &component.version)?
         };
@@ -148,7 +149,6 @@ fn reify_service_connections(
             ExecSomething {
                 extras: builder.build(),
                 cfg: AppPreforkConfiguration {
-                    tenant_id: dm.tenant_id.clone(),
                     deployment_name: dm.deployment_name.clone(),
                     package_id: component.package_id.clone(),
                     artifact,

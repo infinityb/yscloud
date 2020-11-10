@@ -8,6 +8,8 @@ use serde::Serialize;
 use sha2::Sha256;
 use sha3::Keccak512;
 
+use crate::util::hexify;
+
 pub fn start(cfg: Config) {
     eprintln!("config: {:#?}", cfg);
 
@@ -18,12 +20,12 @@ pub fn start(cfg: Config) {
 
     io::copy(&mut artifact_file, &mut sha256_state).unwrap();
     let mut sha256_scratch = [0; 256 / 8 * 2];
-    let sha256_str = tohex(&mut sha256_scratch, &sha256_state.fixed_result()).unwrap();
+    let sha256_str = hexify(&mut sha256_scratch, &sha256_state.fixed_result()).unwrap();
 
     artifact_file.seek(SeekFrom::Start(0)).unwrap();
     io::copy(&mut artifact_file, &mut keccak512_state).unwrap();
     let mut keccak512_scratch = [0; 512 / 8 * 2];
-    let keccak512_str = tohex(&mut keccak512_scratch, &keccak512_state.fixed_result()).unwrap();
+    let keccak512_str = hexify(&mut keccak512_scratch, &keccak512_state.fixed_result()).unwrap();
 
     let metadata = artifact_file.metadata().expect("metadata fetch failure");
 
@@ -46,26 +48,6 @@ pub struct Config {
     pub version: Version,
     pub host_triple: String,
     pub artifact: PathBuf,
-}
-
-fn tohex<'sc>(scratch: &'sc mut [u8], data: &[u8]) -> Option<&'sc str> {
-    static HEX_CHARS: &[u8] = b"0123456789abcdef";
-    let hex_length = data.len() * 2;
-
-    if scratch.len() < hex_length {
-        return None;
-    }
-
-    let mut scratch_iter = scratch.iter_mut();
-    for by in data {
-        let next = scratch_iter.next()?;
-        *next = HEX_CHARS[usize::from(*by >> 4)];
-        let next = scratch_iter.next()?;
-        *next = HEX_CHARS[usize::from(*by & 0x0F)];
-    }
-
-    drop(scratch_iter);
-    Some(::std::str::from_utf8(&scratch[..hex_length]).unwrap())
 }
 
 #[derive(Serialize)]

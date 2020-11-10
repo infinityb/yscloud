@@ -86,7 +86,6 @@ fn main() {
 }
 
 pub struct AppPreforkConfiguration {
-    tenant_id: String,
     deployment_name: String,
     package_id: String,
     artifact: Executable,

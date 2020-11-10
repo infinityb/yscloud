@@ -140,11 +140,13 @@ fn execute_child(e: &ExecConfig) -> io::Result<Void> {
         CStr::from_bytes_with_nul(b"RUST_BACKTRACE=1\0").unwrap(),
         CStr::from_bytes_with_nul(b"YSCLOUD=1\0").unwrap(),
     ];
+
     // need to relabel file descriptors here.
     let mut cstrs: Vec<&CStr> = Vec::new();
     for arg in &e.arguments {
         cstrs.push(arg);
     }
+
     e.executable.execute(&cstrs[..], env)?;
 
     unreachable!();

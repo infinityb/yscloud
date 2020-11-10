@@ -56,7 +56,6 @@ pub fn relabel_file_descriptors(c: &AppPreforkConfiguration) -> io::Result<AppCo
     }
 
     Ok(AppConfiguration {
-        tenant_id: c.tenant_id.clone(),
         deployment_name: c.deployment_name.clone(),
         package_id: c.package_id.clone(),
         instance_id: c.instance_id,

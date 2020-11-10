@@ -18,7 +18,6 @@ pub enum SocketFlag {
 #[derive(Clone, Serialize, Deserialize, Debug, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub struct DeploymentManifest {
-    pub tenant_id: String,
     pub deployment_name: String,
     pub public_services: Vec<DeployedPublicService>,
     pub components: Vec<DeployedApplicationManifest>,
@@ -138,7 +137,6 @@ pub struct ServiceConnection {
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(rename_all = "snake_case")]
 pub struct AppConfiguration {
-    pub tenant_id: String,
     pub deployment_name: String,
     pub package_id: String,
     pub instance_id: Uuid,
@@ -160,6 +158,7 @@ pub struct FileDescriptorInfo {
 pub enum FileDescriptorRemote {
     SideCarService(SideCarServiceInfo),
     Socket(SocketInfo),
+    Capability(FileDescriptorCapabilityInfo),
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -195,6 +194,12 @@ pub enum Protocol {
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "snake_case")]
+pub struct FileDescriptorCapabilityInfo {
+    // nothing yet, just here to get the right json format.
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "snake_case")]
 struct ApplicationDependency {
     pub package_id: String,
     pub version_req: VersionReq,
@@ -203,7 +208,6 @@ struct ApplicationDependency {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "snake_case")]
 pub struct ApplicationDeploymentTemplate {
-    pub tenant_id: String,
     pub deployment_name: String,
     pub public_services: Vec<PublicService>,
     pub service_implementations: BTreeMap<String, ApplicationDeploymentRequirement>,

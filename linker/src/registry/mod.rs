@@ -7,6 +7,7 @@ use std::io::{self, BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
+use std::fmt;
 
 use failure::Fallible;
 use futures::future::FutureExt;
@@ -69,13 +70,16 @@ impl Registry for FileRegistry {
         package_id: &str,
         ver_req: &VersionReq,
     ) -> Pin<Box<dyn Future<Output = Fallible<RegistryEntry>> + Send + 'static>> {
+
         let base_path = self.base_path.clone();
         let package_id = package_id.to_owned();
         let ver_req = ver_req.to_owned();
 
         async move {
             let mut current_winner: Option<Version> = None;
+
             for version in registry_file_get_versions(&base_path, &package_id)? {
+
                 if ver_req.matches(&version) {
                     if let Some(old_candidate) = current_winner.as_mut() {
                         if *old_candidate < version {
@@ -98,6 +102,38 @@ impl Registry for FileRegistry {
     }
 }
 
+struct PathFailure {
+    path: PathBuf,
+    cause: Box<dyn failure::Fail>,
+}
+
+impl PathFailure {
+    fn new<F>(path: PathBuf, cause: F) -> PathFailure where F: failure::Fail {
+        PathFailure {
+            path,
+            cause: Box::new(cause),
+        }
+    }
+}
+
+impl fmt::Debug for PathFailure {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{}", self)
+    }
+}
+
+impl fmt::Display for PathFailure {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{}: {}", self.cause, self.path.display())
+    }
+}
+
+impl failure::Fail for PathFailure {
+    fn cause(&self) -> Option<&dyn failure::Fail> {
+        Some(&self.cause)
+    }
+}
+
 fn registry_file_get_versions(base_path: &Path, package_id: &str) -> Fallible<Vec<Version>> {
     fn version_from_filename(s: OsString) -> Result<Version, ()> {
         if let Ok(vs) = s.into_string() {
@@ -116,7 +152,7 @@ fn registry_file_get_versions(base_path: &Path, package_id: &str) -> Fallible<Ve
 
     let mut out = Vec::new();
 
-    for dir in read_dir(&path)? {
+    for dir in read_dir(&path).map_err(|e| PathFailure::new(path, e))? {
         let dir_entry = dir?;
 
         if let Ok(version) = version_from_filename(dir_entry.file_name()) {
@@ -138,6 +174,7 @@ fn registry_file_load_version(
     hash_path.push("sha256");
 
     let mut sha256s: HashMap<String, String> = Default::default();
+
     let file = File::open(&hash_path)?;
     for line in BufReader::new(file).lines() {
         let line = line?;
