@@ -56,7 +56,7 @@ fn main() {
         .subcommand(start_daemon::get_subcommand());
 
     #[cfg(target_os = "linux")]
-    app.subcommand(unstable_setup_container::get_subcommand());
+    let app = app.subcommand(unstable_setup_container::get_subcommand());
 
     let matches = app.get_matches();
 

@@ -1,3 +1,4 @@
+/vendor
 /target
 **/*.rs.bk
 .DS_Store
