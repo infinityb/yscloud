@@ -41,7 +41,7 @@ def load_sessions(fh):
 
 def get_sessions(path):
     subproc = subprocess.Popen(
-        ['/bin/nc', '-U', path],
+        ['nc', '-U', path],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE)
     try:
@@ -89,7 +89,7 @@ def print_session(sess):
 
 
 def main():
-    socket_path = '/var/run/sni-multiplexor-mgmt'
+    socket_path = '/tmp/sni-multiplexor-mgmt'
     sessions = get_sessions(socket_path)
     to_destroy = []
     for sess in sessions:

@@ -274,7 +274,7 @@ fn exec_artifact_child(e: &ExecExtras, c: AppPreforkConfiguration) -> io::Result
 }
 
 pub fn exec_artifact(e: &ExecExtras, c: AppPreforkConfiguration) -> io::Result<Pid> {
-    match fork() {
+    match unsafe { fork() } {
         Ok(ForkResult::Child) => {
             if let Err(err) = exec_artifact_child(e, c) {
                 event!(Level::WARN, "failed to execute: {:?}", err);

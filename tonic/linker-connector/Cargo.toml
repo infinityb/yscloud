@@ -1,5 +1,5 @@
 [package]
-name = "owned_fd"
+name = "linker-connector"
 version = "0.1.0"
 authors = ["Stacey Ell <stacey.ell@gmail.com>"]
 edition = "2018"
@@ -7,4 +7,8 @@ edition = "2018"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-nix = "0.19"
+tokio = "0.2"
+hyper = "0.13.9"
+tracing = "0.1.21"
+tower-service = "0.3.0"
+futures = "0.3"

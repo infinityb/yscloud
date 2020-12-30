@@ -22,6 +22,9 @@ use self::macos as imp;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 mod posix;
 
+#[cfg(any(target_os = "linux"))]
+pub use self::linux::container as container;
+
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 use self::posix as posix_imp;
 

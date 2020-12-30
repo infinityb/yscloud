@@ -1,0 +1,34 @@
+syntax = "proto3";
+
+package org.yshi.certificate_issuer.v1;
+
+option go_package = "certificate_issuer;certificate_issuer";
+
+message RenewCertificateRequest {
+    string hostname = 1;
+}
+
+message RenewCertificateResponse {
+    string hostname = 1;
+    // leaf first
+    repeated bytes certificates = 2;
+    bytes private_key = 3;
+    // XXX: rename to ttl_duration_ms?
+    int64 ttl_duration_millis = 4;
+}
+
+service CertificateIssuer {
+    rpc RenewCertificate(RenewCertificateRequest) returns (RenewCertificateResponse);
+}
+
+message SubscribeCertificateUpdateRequest {
+	RenewCertificateRequest wrapped = 1;
+}
+
+message SubscribeCertificateUpdateResponse {
+	RenewCertificateResponse wrapped = 1;
+}
+
+service CertificateAcmeManager {
+	rpc SubscribeCertificateUpdate(SubscribeCertificateUpdateRequest) returns (stream SubscribeCertificateUpdateResponse);
+}

@@ -6,4 +6,6 @@ pub mod start_daemon;
 
 pub mod publish_artifact;
 
+pub mod unstable_setup_container;
+
 mod common;

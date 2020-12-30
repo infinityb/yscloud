@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    body {
+      padding: 0px;
+      margin: 0px;
+      background-color: #F3F4EC;
+      color: #474E44;
+    }
+
+    #header {
+      padding: 0px;
+      margin-top: 0.0em;
+      padding-top: 1em;
+      padding-bottom: 1em;
+      margin-bottom: 0px;
+      border-bottom: 1px solid #bab1b1;
+      background: #CCCFBC;
+      text-align: left;
+      padding-right: 2em;
+      padding-left: .5em;
+    }
+
+    h1 {
+      font-size: xx-large;
+      color: #880000;
+      font-weight: bold;
+      margin-top: 1px;
+      margin-bottom: 3px;
+    }
+
+    #header h1 {
+      padding: 0px;
+      margin: 0px;
+      margin-bottom: 0px;
+      margin-bottom: 0.3em;
+      font-size: 1.2em;
+      letter-spacing: 0.2em;
+    }
+    
+    #header h1 a {
+      color: #5B7B57;
+      text-decoration: none;
+    }
+
+    a {
+      color: #3C657B;
+      text-decoration: none;
+    }
+
+    #main-box {
+      margin: 1em;
+    }
+
+    #footer {
+      margin: 1em;
+    }
+
+    .flexcontainer {
+      padding: 5em;
+      margins: 1em;
+      display: flex;
+      flex-direction: row;
+      align-items: center;
+      justify-content: center;
+    }
+
+    @media screen and (max-width: 700px) {
+      .flexcontainer {
+        padding: 1em;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+      }
+    }
+
+    .flexcontainer div {
+      width: 400px;
+      float: bottom;
+    }
+
+    .flexcontainer div.magpie {
+      padding: 1em;
+      width: 300px;
+      height: 180px;
+    }
+
+    .details {
+      font-size: 10pt;
+      font-family: "Lucida Console", Monaco, monospace;
+    }
+  </style>
+  </head>
+  <body>
+    <div id="header">
+      <h1>Directory Listing</h1>
+    </div>
+    <br clear="all">
+    <div id="main-box">
+      <p>in <b>{{ current_path }}</b></p>
+
+      {% if !is_root %}
+      <p><a href="..">Parent Directory</a></p>
+      {% endif %}
+
+      {% for e in entries %}
+        [{{ e.file_type }}]
+        <a href="{{ e.file_name }}{{ e.directory_trailer() }}">
+          {{ e.file_name }}{{ e.directory_trailer() }}
+        </a>
+        {% if !e.is_directory %}
+          ({{ e.file_size_human_readable() }})
+        {% endif %}
+        <br/>
+
+      {% endfor %}
+    </div>
+    <br clear="all">
+    <div id="footer">
+      <small>rendered in {{ "{:?}"|format(render_time) }} by {{ fe_instance_id }}</small>
+    </div>
+  </body>
+</html>

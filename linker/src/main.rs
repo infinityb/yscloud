@@ -32,8 +32,8 @@ const CARGO_PKG_NAME: &str = env!("CARGO_PKG_NAME");
 fn main() {
     let mut my_subscriber_builder = FmtSubscriber::builder();
 
-    use self::cmdlet::{create_release, publish_artifact, run, start_daemon};
-    let matches = App::new(CARGO_PKG_NAME)
+    use self::cmdlet::{create_release, publish_artifact, run, start_daemon, unstable_setup_container};
+    let app = App::new(CARGO_PKG_NAME)
         .version(CARGO_PKG_VERSION)
         .author("Stacey Ell <stacey.ell@gmail.com>")
         .about("Microservice/sidecar linker and privilege separation")
@@ -53,8 +53,12 @@ fn main() {
         .subcommand(create_release::get_subcommand())
         .subcommand(publish_artifact::get_subcommand())
         .subcommand(run::get_subcommand())
-        .subcommand(start_daemon::get_subcommand())
-        .get_matches();
+        .subcommand(start_daemon::get_subcommand());
+
+    #[cfg(target_os = "linux")]
+    app.subcommand(unstable_setup_container::get_subcommand());
+
+    let matches = app.get_matches();
 
     let verbosity = matches.occurrences_of("v");
     let should_print_test_logging = 4 < verbosity;
@@ -80,6 +84,7 @@ fn main() {
         publish_artifact::SUBCOMMAND_NAME => publish_artifact::main,
         run::SUBCOMMAND_NAME => run::main,
         start_daemon::SUBCOMMAND_NAME => start_daemon::main,
+        unstable_setup_container::SUBCOMMAND_NAME => unstable_setup_container::main,
         _ => panic!("bad argument parse"),
     };
     main_function(args.expect("subcommand args"));

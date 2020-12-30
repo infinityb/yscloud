@@ -1,0 +1,39 @@
+[package]
+name = "boss-webserver"
+version = "0.1.1"
+authors = ["Stacey Ell <stacey.ell@gmail.com>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+# internal
+magnetite-common = { path = "../magnetite-common" }
+bencode = { path = "../bencode" }
+boss-vfs = { path = "../vfs" }
+ksuid = { path = "../../ksuid" }
+webserver = { path = "../../webserver" }
+
+# external
+askama = "0.8"
+bytes = "0.5.5"
+byteorder = "1"
+clap = { version = "2.33.1", default-features = false }
+failure = "0.1.8"
+futures = "0.3.5"
+hyper = "0.13"
+linked-hash-map = "0.5.3"
+metrics = "0.12.1"
+metrics-core = "0.5.0"
+metrics-runtime = "0.13.0"
+percent-encoding = "2.1"
+rand = "0.7.3"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha-1 = "0.8"
+tokio = { version = "0.2", features = ["full"] }
+tokio-postgres = "0.5.4"
+tracing = "0.1.9"
+tracing-subscriber = "0.1.5"
+uuid = { version = "0.8.1", features = ["v4", "serde"] }
+typed-arena = "2.0"

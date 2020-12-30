@@ -6,6 +6,7 @@ use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::collections::HashSet;
 
 use digest::FixedOutput;
 use nix::fcntl::{fcntl, open, OFlag};
@@ -22,6 +23,12 @@ use crate::Void;
 
 use memfd::{MemFd, MemFdOptions, SealFlag};
 use owned_fd::OwnedFd;
+
+pub mod arch;
+pub mod seccomp;
+pub mod unshare;
+pub mod container;
+pub mod mount;
 
 #[derive(Debug)]
 pub struct Executable(OwnedFd);
@@ -175,6 +182,7 @@ pub struct UserChangeStrategy {
     workdir: Option<PathBuf>,
     set_user: Option<Uid>,
     set_group: Option<Gid>,
+    seccomp_props: HashSet<&'static str>,
 }
 
 fn io_other<E>(e: E) -> io::Error
@@ -193,17 +201,30 @@ impl SandboxingStrategy for UserChangeStrategy {
                 .map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
         }
 
+        // seccomp::setup(&self.seccomp_props).unwrap();
+        if let Some(ref wd) = self.workdir {
+            event!(Level::INFO, "setting cwd = {}", wd.display());
+            nix::unistd::chdir(wd).map_err(io_other)?;
+        }
+
+        if !self.seccomp_props.contains("*") {
+            if !self.seccomp_props.contains("@filesystem") {
+                unshare::restrict_filesystem()?;
+            }
+
+            if !self.seccomp_props.contains("@network") {
+               unshare::restrict_network()?;
+            }
+        }
+
         if let Some(gid) = self.set_group {
             event!(Level::INFO, "setting gid = {:?}", gid);
             nix::unistd::setgid(gid).map_err(io_other)?;
         }
+
         if let Some(uid) = self.set_user {
             event!(Level::INFO, "setting uid = {:?}", uid);
             nix::unistd::setuid(uid).map_err(io_other)?;
-        }
-        if let Some(ref wd) = self.workdir {
-            event!(Level::INFO, "setting cwd = {}", wd.display());
-            nix::unistd::chdir(wd).map_err(io_other)?;
         }
 
         Ok(())
@@ -216,7 +237,10 @@ pub struct ExecExtras {
 
 impl ExecExtras {
     pub fn builder() -> ExecExtrasBuilder {
-        Default::default()
+        let mut builder: ExecExtrasBuilder = Default::default();
+        builder.seccomp_props.insert("@network");
+        // builder.seccomp_props.add("*");
+        builder
     }
 }
 
@@ -225,6 +249,7 @@ pub struct ExecExtrasBuilder {
     workdir: Option<PathBuf>,
     set_user: Option<Uid>,
     set_group: Option<Gid>,
+    seccomp_props: HashSet<&'static str>,
 }
 
 impl ExecExtrasBuilder {
@@ -253,6 +278,14 @@ impl ExecExtrasBuilder {
         Ok(())
     }
 
+    pub fn clear_seccomp_permission(&mut self) {
+        self.seccomp_props.clear();
+    }
+
+    pub fn add_seccomp_permission(&mut self, value: &'static str) {
+        self.seccomp_props.insert(value);
+    }
+
     pub fn build(&self) -> ExecExtras {
         let mut sandboxing_strategy = None;
 
@@ -261,6 +294,7 @@ impl ExecExtrasBuilder {
                 workdir: self.workdir.clone(),
                 set_user: self.set_user.clone(),
                 set_group: self.set_group.clone(),
+                seccomp_props: self.seccomp_props.clone(),
             });
 
             sandboxing_strategy = Some(obj.into());
@@ -320,7 +354,7 @@ fn exec_artifact_child(ext: &ExecExtras, c: &AppPreforkConfiguration) -> io::Res
 }
 
 pub fn exec_artifact(e: &ExecExtras, c: AppPreforkConfiguration) -> io::Result<Pid> {
-    match fork() {
+    match unsafe { fork() } {
         Ok(ForkResult::Child) => {
             if let Err(err) = exec_artifact_child(e, &c) {
                 event!(Level::WARN, "failed to execute: {:?}", err);
