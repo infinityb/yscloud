@@ -10,8 +10,9 @@ use digest::FixedOutput;
 use nix::unistd::{execve, fork, lseek, unlink, write, ForkResult, Pid, Whence};
 use rand::{thread_rng, Rng};
 use sha2::Sha256;
-use tempfile::{tempdir, TempDir};
+use tempfile::{tempdir, tempdir_in, TempDir};
 use tracing::{event, Level};
+use yscloud_config_model::ImageType;
 
 use super::posix_imp::relabel_file_descriptors;
 pub use super::posix_imp::run_reified;
@@ -32,8 +33,7 @@ pub struct ExecutableFactory {
 }
 
 impl ExecutableFactory {
-    pub fn new(name: &str, _capacity: i64) -> io::Result<ExecutableFactory> {
-        let temporary_dir = tempdir()?;
+    fn new_in_temporary(name: &str, temporary_dir: TempDir) -> io::Result<ExecutableFactory> {
         let fully_qualified_path = temporary_dir.path().join(name);
         let backing_storage = File::create(&fully_qualified_path)?;
 
@@ -49,8 +49,18 @@ impl ExecutableFactory {
         })
     }
 
+    pub fn new_on_disk(name: &str, _capacity: i64, root: &Path) -> io::Result<ExecutableFactory> {
+        let temporary_dir = tempdir_in(root)?;
+        Self::new_in_temporary(name, temporary_dir)
+    }
+
+    pub fn new_unspecified(name: &str, _capacity: i64) -> io::Result<ExecutableFactory> {
+        let temporary_dir = tempdir()?;
+        Self::new_in_temporary(name, temporary_dir)
+    }
+
     pub fn validate_sha(&self, expect_sha: &str) -> io::Result<()> {
-        let sha_result = self.sha_state.clone().fixed_result();
+        let sha_result = self.sha_state.clone().finalize_fixed();
         let mut scratch = [0; 256 / 8 * 2];
 
         let got_sha = crate::util::hexify(&mut scratch[..], &sha_result[..]).unwrap();
@@ -63,7 +73,7 @@ impl ExecutableFactory {
         Ok(())
     }
 
-    pub fn finalize(self) -> Executable {
+    pub fn finalize_executable(self) -> Executable {
         Executable {
             path: self.fully_qualified_path.canonicalize().unwrap(),
             temporary_dir: Some(self.temporary_dir),

@@ -1,3 +1,5 @@
+pub mod artifact_metastamp;
+
 pub mod create_release;
 
 pub mod run;

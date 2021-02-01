@@ -39,6 +39,9 @@ pub struct DeployedApplicationManifest {
     pub sandbox: Sandbox,
     pub extras: serde_json::Value,
 
+    #[serde(default = "Default::default")]
+    pub image_type: ImageType,
+
     // platform triple -> ArtifactHashSet
     #[serde(default = "Default::default")]
     pub artifacts: BTreeMap<String, ArtifactHashSet>,
@@ -113,6 +116,28 @@ pub struct NativePortBinder {
 
 fn start_listen_default() -> bool {
     true
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum ImageType {
+    Executable,
+    Squashfs,
+}
+
+impl Default for ImageType {
+    fn default() -> ImageType {
+        ImageType::Executable
+    }
+}
+
+impl ImageType {
+    pub fn is_container(&self) -> bool {
+        match *self {
+            ImageType::Executable => false,
+            ImageType::Squashfs => true,
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]

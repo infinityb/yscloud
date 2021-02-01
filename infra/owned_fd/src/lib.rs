@@ -1,6 +1,7 @@
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd, RawFd};
+use std::os::unix::net::UnixListener;
 
 use nix::unistd::{read, write};
 
@@ -13,6 +14,16 @@ use nix::unistd::lseek64;
 #[derive(Debug)]
 pub struct OwnedFd {
     raw_fd: RawFd,
+}
+
+pub trait IntoOwnedFd {
+    fn into_owned_fd(self) -> OwnedFd;
+}
+
+impl<T> IntoOwnedFd for T where T: IntoRawFd {
+    fn into_owned_fd(self) -> OwnedFd {
+        OwnedFd { raw_fd: self.into_raw_fd() }
+    }
 }
 
 impl OwnedFd {
@@ -44,6 +55,15 @@ impl From<File> for OwnedFd {
         }
     }
 }
+
+impl From<UnixListener> for OwnedFd {
+    fn from(fd: UnixListener) -> OwnedFd {
+        OwnedFd {
+            raw_fd: fd.into_raw_fd(),
+        }
+    }
+}
+
 
 impl AsRawFd for OwnedFd {
     fn as_raw_fd(&self) -> RawFd {

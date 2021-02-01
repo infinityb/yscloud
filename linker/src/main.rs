@@ -1,4 +1,5 @@
 use std::io;
+use std::path::PathBuf;
 
 use clap::{App, AppSettings, Arg};
 use uuid::Uuid;
@@ -32,7 +33,10 @@ const CARGO_PKG_NAME: &str = env!("CARGO_PKG_NAME");
 fn main() {
     let mut my_subscriber_builder = FmtSubscriber::builder();
 
-    use self::cmdlet::{create_release, publish_artifact, run, start_daemon, unstable_setup_container};
+    use self::cmdlet::{
+        artifact_metastamp, create_release, publish_artifact, run, start_daemon,
+        unstable_setup_container,
+    };
     let app = App::new(CARGO_PKG_NAME)
         .version(CARGO_PKG_VERSION)
         .author("Stacey Ell <stacey.ell@gmail.com>")
@@ -50,6 +54,7 @@ fn main() {
                 .multiple(true)
                 .help("Sets the level of verbosity for all packages (debugging)"),
         )
+        .subcommand(artifact_metastamp::get_subcommand())
         .subcommand(create_release::get_subcommand())
         .subcommand(publish_artifact::get_subcommand())
         .subcommand(run::get_subcommand())
@@ -85,6 +90,7 @@ fn main() {
         run::SUBCOMMAND_NAME => run::main,
         start_daemon::SUBCOMMAND_NAME => start_daemon::main,
         unstable_setup_container::SUBCOMMAND_NAME => unstable_setup_container::main,
+        artifact_metastamp::SUBCOMMAND_NAME => artifact_metastamp::main,
         _ => panic!("bad argument parse"),
     };
     main_function(args.expect("subcommand args"));
@@ -98,6 +104,7 @@ pub struct AppPreforkConfiguration {
     version: String,
     files: Vec<ServiceFileDescriptor>,
     extras: serde_json::Value,
+    container_mounts: Vec<(PathBuf, PathBuf)>,
 }
 
 pub struct ServiceFileDescriptor {

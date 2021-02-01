@@ -20,12 +20,12 @@ pub fn start(cfg: Config) {
 
     io::copy(&mut artifact_file, &mut sha256_state).unwrap();
     let mut sha256_scratch = [0; 256 / 8 * 2];
-    let sha256_str = hexify(&mut sha256_scratch, &sha256_state.fixed_result()).unwrap();
+    let sha256_str = hexify(&mut sha256_scratch, &sha256_state.finalize_fixed()).unwrap();
 
     artifact_file.seek(SeekFrom::Start(0)).unwrap();
     io::copy(&mut artifact_file, &mut keccak512_state).unwrap();
     let mut keccak512_scratch = [0; 512 / 8 * 2];
-    let keccak512_str = hexify(&mut keccak512_scratch, &keccak512_state.fixed_result()).unwrap();
+    let keccak512_str = hexify(&mut keccak512_scratch, &keccak512_state.finalize_fixed()).unwrap();
 
     let metadata = artifact_file.metadata().expect("metadata fetch failure");
 

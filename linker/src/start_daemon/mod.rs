@@ -18,15 +18,16 @@ use uuid::Uuid;
 use yscloud_config_model::{
     DeployedApplicationManifest, DeploymentManifest, FileDescriptorRemote, Protocol,
     PublicServiceBinder, Sandbox, ServiceFileDirection, SideCarServiceInfo, SocketInfo, SocketMode,
+    ImageType,
 };
 
-use crate::platform::{Executable, ExecutableFactory};
+use crate::platform::{Executable, ExecutableFactory, ExecutableFactoryHasher};
 use crate::{
     artifact::direct_load_artifact, bind_service, AppPreforkConfiguration, ExecExtras,
     ExecSomething, ServiceFileDescriptor,
 };
 
-const DEFAULT_MAX_ARTIFACT_SIZE: u64 = 50 * 1 << 20; // 50 MB
+const DEFAULT_MAX_ARTIFACT_SIZE: u64 = 5000 * 1 << 20; // 5000 MB
 
 pub fn start(cfg: Config) {
     let rdr = File::open("example-deployment-manifest.json").unwrap();
@@ -159,15 +160,21 @@ async fn download_components(
             content_length
         );
 
-        let mut fac = ExecutableFactory::new(filename, content_length.try_into()?)?;
+        if dam.image_type != ImageType::Executable {
+            return Err(io::Error::new(io::ErrorKind::Other, "artifact type unsupported - must be executable").into());
+        }
+
+        let mut fac = ExecutableFactory::new_unspecified(filename, content_length.try_into()?)?;
+        fac.enable_hasher(ExecutableFactoryHasher::Sha256);
 
         let mut resp_data = response.bytes_stream();
         while let Some(v) = resp_data.next().await {
             let v = v?;
             fac.write(&v[..])?;
         }
-        fac.validate_sha(&sha)?;
-        Ok(fac.finalize())
+
+        fac.validate_hash(ExecutableFactoryHasher::Sha256, &sha)?;
+        Ok(fac.finalize_executable())
     }
 }
 
@@ -216,6 +223,7 @@ fn reify_service_connections(
                     instance_id,
                     files: Default::default(),
                     extras: component.extras.clone(),
+                    container_mounts: Default::default(),
                 },
             },
         );

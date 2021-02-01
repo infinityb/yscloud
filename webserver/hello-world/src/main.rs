@@ -50,23 +50,23 @@ async fn main() -> Result<()> {
         print_test_logging();
     }
 
-    let stream = TcpStream::connect("google.com:80")?;
-    let raw_fd = stream.into_raw_fd();
+    // let stream = TcpStream::connect("google.com:80")?;
+    // let raw_fd = stream.into_raw_fd();
 
-    let mut conn = linker_connector::Connector::builder("foobar");
-    unsafe { conn.push_connected_descriptor(raw_fd) }?;
-    let connector = conn.build();
+    // let mut conn = linker_connector::Connector::builder("foobar");
+    // unsafe { conn.push_connected_descriptor(raw_fd) }?;
+    // let connector = conn.build();
 
-    let client: Client<_, Body> = Client::builder().build(connector);
+    // let client: Client<_, Body> = Client::builder().build(connector);
 
-    for i in 0..4 {
-        let res = client.get(Uri::from_static("http://google.com")).await?;
-        println!("status({}): {}", i, res.status());
-        let buf = hyper::body::to_bytes(res).await?;
-        println!("body({}): {:?}", i, buf);
-    }
+    // for i in 0..4 {
+    //     let res = client.get(Uri::from_static("http://google.com")).await?;
+    //     println!("status({}): {}", i, res.status());
+    //     let buf = hyper::body::to_bytes(res).await?;
+    //     println!("body({}): {:?}", i, buf);
+    // }
 
-    event!(Level::INFO, "Hello, world!");
+    // event!(Level::INFO, "Hello, world!");
     Ok(())
 }
 

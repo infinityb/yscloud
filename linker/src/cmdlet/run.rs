@@ -3,15 +3,18 @@ use std::error::Error as StdError;
 use std::fs::File;
 use std::os::unix::io::AsRawFd;
 use std::path::Path;
+use std::os::unix::net::UnixListener;
 
 use clap::{App, Arg, SubCommand};
 use tracing::{event, span, Level};
 use uuid::Uuid;
 
 use sockets::socketpair_raw;
+use owned_fd::OwnedFd;
 use yscloud_config_model::{
     DeployedApplicationManifest, DeploymentManifest, FileDescriptorRemote, Protocol,
     PublicServiceBinder, Sandbox, ServiceFileDirection, SideCarServiceInfo, SocketInfo, SocketMode,
+    ServiceId,
 };
 
 use super::common;
@@ -90,6 +93,87 @@ pub fn main(matches: &clap::ArgMatches) {
     crate::platform::run_reified(reified);
 }
 
+fn setup_named_socket_service_connection(
+    instances: &mut HashMap<Uuid, ExecSomething>,
+    service_id: &ServiceId,
+    local_instance_id: &Uuid,
+    remote_instance_id: &Uuid,
+    local_cfg: &DeployedApplicationManifest,
+    local_socket_path: &Path,
+) -> Result<(), Box<dyn StdError>> {
+    // local service is a legacy container, so instead of pre-creating file
+    // descriptor on the container side, we create a named socket connected
+    // to the remote instance in the local container's namespace.
+
+    let mut service_socket = local_socket_path.to_owned();
+    service_socket.push(&service_id.service_name);
+
+    let listener_fd: OwnedFd = UnixListener::bind(&service_socket)?.into();
+
+    let remote_instance = instances.get_mut(remote_instance_id).ok_or_else(|| {
+        format!("internal error: unknown instance {:?}", remote_instance_id)
+    })?;
+
+    let sidecar_info = SideCarServiceInfo {
+        instance_id: *local_instance_id,
+        package_id: local_cfg.package_id.clone(),
+        version: local_cfg.version.clone(),
+    };
+    remote_instance.cfg.files.push(ServiceFileDescriptor {
+        file: listener_fd,
+        direction: ServiceFileDirection::ServingListening,
+        service_name: service_id.service_name.clone(),
+        remote: FileDescriptorRemote::SideCarService(sidecar_info),
+    });
+
+    Ok(())
+}
+
+fn setup_preconnected_service_connection(
+    instances: &mut HashMap<Uuid, ExecSomething>,
+    service_id: &ServiceId,
+    local_instance_id: &Uuid,
+    remote_instance_id: &Uuid,
+    local_cfg: &DeployedApplicationManifest,
+    remote_cfg: &DeployedApplicationManifest,
+) -> Result<(), Box<dyn StdError>> {
+    let (local_sock, remote_sock) = socketpair_raw()?;
+
+    let local_instance = instances.get_mut(local_instance_id).ok_or_else(|| {
+        format!("internal error: unknown instance {:?}", local_instance_id)
+    })?;
+
+    let sidecar_info = SideCarServiceInfo {
+        instance_id: *remote_instance_id,
+        package_id: remote_cfg.package_id.clone(),
+        version: remote_cfg.version.clone(),
+    };
+    local_instance.cfg.files.push(ServiceFileDescriptor {
+        file: local_sock,
+        direction: ServiceFileDirection::Consuming,
+        service_name: service_id.service_name.clone(),
+        remote: FileDescriptorRemote::SideCarService(sidecar_info),
+    });
+
+    let remote_instance = instances.get_mut(remote_instance_id).ok_or_else(|| {
+        format!("internal error: unknown instance {:?}", remote_instance_id)
+    })?;
+
+    let sidecar_info = SideCarServiceInfo {
+        instance_id: *local_instance_id,
+        package_id: local_cfg.package_id.clone(),
+        version: local_cfg.version.clone(),
+    };
+    remote_instance.cfg.files.push(ServiceFileDescriptor {
+        file: remote_sock,
+        direction: ServiceFileDirection::ServingConnected,
+        service_name: service_id.service_name.clone(),
+        remote: FileDescriptorRemote::SideCarService(sidecar_info),
+    });
+
+    Ok(())
+}
+
 fn reify_service_connections(
     dm: &DeploymentManifest,
     artifact_path: &str,
@@ -156,6 +240,7 @@ fn reify_service_connections(
                     instance_id,
                     files: Default::default(),
                     extras: component.extras.clone(),
+                    container_mounts: Default::default(),
                 },
             },
         );
@@ -187,6 +272,7 @@ fn reify_service_connections(
             bind_target = ?ps.binder,
             "binding public service",
         );
+
         let service_sock = bind_service(&ps.binder)?;
         event!(Level::INFO,
             service_name = &ps.service_id.service_name[..],
@@ -221,40 +307,35 @@ fn reify_service_connections(
                 format!("internal error: unknown instance {:?}", remote_instance_id)
             })?;
 
-            let (local_sock, remote_sock) = socketpair_raw()?;
+            if local_cfg.image_type.is_container() {
+                const CONTAINER_SOCKETS_DIR_NAME: &str = "sockets";
 
-            {
-                let local_instance = instances.get_mut(local_instance_id).ok_or_else(|| {
-                    format!("internal error: unknown instance {:?}", local_instance_id)
-                })?;
+                let mut workdir = approot.to_owned();
+                workdir.push(&dm.deployment_name);
+                workdir.push(&ls.package_id);
+                workdir.push(CONTAINER_SOCKETS_DIR_NAME);
 
-                local_instance.cfg.files.push(ServiceFileDescriptor {
-                    file: local_sock,
-                    direction: ServiceFileDirection::Consuming,
-                    service_name: ls.service_name.clone(),
-                    remote: FileDescriptorRemote::SideCarService(SideCarServiceInfo {
-                        instance_id: *remote_instance_id,
-                        package_id: remote_cfg.package_id.clone(),
-                        version: remote_cfg.version.clone(),
-                    }),
-                });
-            }
+                std::fs::create_dir_all(&workdir)?;
 
-            {
-                let remote_instance = instances.get_mut(remote_instance_id).ok_or_else(|| {
-                    format!("internal error: unknown instance {:?}", remote_instance_id)
-                })?;
+                workdir.push(&remote_cfg.package_id);
 
-                remote_instance.cfg.files.push(ServiceFileDescriptor {
-                    file: remote_sock,
-                    direction: ServiceFileDirection::ServingConnected,
-                    service_name: ls.service_name.clone(),
-                    remote: FileDescriptorRemote::SideCarService(SideCarServiceInfo {
-                        instance_id: *local_instance_id,
-                        package_id: local_cfg.package_id.clone(),
-                        version: local_cfg.version.clone(),
-                    }),
-                });
+                setup_named_socket_service_connection(
+                    &mut instances,
+                    ls,
+                    local_instance_id,
+                    remote_instance_id,
+                    local_cfg,
+                    &workdir,
+                )?;
+            } else {
+                setup_preconnected_service_connection(
+                    &mut instances,
+                    ls,
+                    local_instance_id,
+                    remote_instance_id,
+                    local_cfg,
+                    remote_cfg,
+                )?;
             }
         }
     }

@@ -7,22 +7,24 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::collections::HashSet;
+use std::fs::File;
 
-use digest::FixedOutput;
+use digest::{Digest, FixedOutput};
 use nix::fcntl::{fcntl, open, OFlag};
 use nix::sys::stat::Mode;
 use nix::unistd::{execveat, fork, lseek64, write, ForkResult, Gid, Pid, Uid, Whence};
-use sha2::Sha256;
+use sha2::{Sha256, Sha512};
+use sha3::{Sha3_512, Keccak512};
 use tracing::{event, Level};
 use users::{get_group_by_name, get_user_by_name};
 
+use yscloud_config_model::ImageType;
+use memfd::{MemFd, MemFdOptions, SealFlag};
+use owned_fd::{OwnedFd, IntoOwnedFd};
+
 use super::posix_imp::relabel_file_descriptors;
 pub use super::posix_imp::run_reified;
-use crate::AppPreforkConfiguration;
-use crate::Void;
-
-use memfd::{MemFd, MemFdOptions, SealFlag};
-use owned_fd::OwnedFd;
+use crate::{Void, AppPreforkConfiguration};
 
 pub mod arch;
 pub mod seccomp;
@@ -30,18 +32,31 @@ pub mod unshare;
 pub mod container;
 pub mod mount;
 
+pub struct ContainerImage {
+    file: PathBuf,
+    mounts: Vec<(PathBuf, PathBuf)>,
+}
+
+impl ContainerImage {
+    pub fn start(&self) -> io::Result<Void> {
+        return Err(io::Error::new(io::ErrorKind::Other, "containers not yet implemented"));
+    }
+}
+
 #[derive(Debug)]
-pub struct Executable(OwnedFd);
+pub struct Executable {
+    file: OwnedFd,
+}
 
 impl fmt::Display for Executable {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "fd:{}", self.0.as_raw_fd())
+        write!(f, "fd+executable:{}", self.file.as_raw_fd())
     }
 }
 
 impl AsRawFd for Executable {
     fn as_raw_fd(&self) -> RawFd {
-        self.0.as_raw_fd()
+        self.file.as_raw_fd()
     }
 }
 
@@ -57,12 +72,17 @@ fn nix_error_to_io_error(err: nix::Error) -> io::Error {
 }
 
 pub struct ExecutableFactory {
-    mem_fd: MemFd,
-    sha_state: Sha256,
+    storage: File,
+    expected_path: PathBuf,
+    disk_linked: bool,
 }
 
 impl ExecutableFactory {
-    pub fn new(name: &str, capacity: i64) -> io::Result<ExecutableFactory> {
+    pub fn new_unspecified(name: &str, capacity: i64) -> io::Result<ExecutableFactory> {
+        Self::new_in_memory(name, capacity)
+    }
+
+    pub fn new_in_memory(name: &str, capacity: i64) -> io::Result<ExecutableFactory> {
         let mut mem_fd = MemFdOptions::new()
             .cloexec(true)
             .allow_sealing(true)
@@ -76,49 +96,47 @@ impl ExecutableFactory {
             .map_err(|e| nix_error_to_io_error(e))?;
 
         Ok(ExecutableFactory {
-            mem_fd,
-            sha_state: Default::default(),
+            storage: mem_fd.into(),
+            expected_path: Default::default(),
+            disk_linked: false,
         })
     }
 
-    pub fn validate_sha(&self, expect_sha: &str) -> io::Result<()> {
-        let sha_result = self.sha_state.clone().fixed_result();
-        let mut scratch = [0; 256 / 8 * 2];
+    pub fn new_on_disk(name: &str, capacity: i64, root: &Path) -> io::Result<ExecutableFactory> {
+        let mut full_path = root.to_owned();
+        full_path.push(name);
 
-        let got_sha = crate::util::hexify(&mut scratch[..], &sha_result[..]).unwrap();
+        let storage = File::create(&full_path)?;
 
-        event!(
-            Level::DEBUG,
-            "checking sha: expecting: {}, got: {}",
-            expect_sha,
-            got_sha
-        );
-        if expect_sha != got_sha {
-            let msg = format!("sha mismatch {} != {}", expect_sha, got_sha);
-            return Err(io::Error::new(io::ErrorKind::Other, msg));
-        }
-
-        Ok(())
+        Ok(ExecutableFactory {
+            storage,
+            expected_path: full_path,
+            disk_linked: true,
+        })
     }
 
-    pub fn finalize(self) -> Executable {
-        Executable(self.mem_fd.into_owned_fd())
+    pub fn finalize_container(self) -> ContainerImage {
+        assert!(self.disk_linked, "must be disk-linked");
+        ContainerImage {
+            file: self.expected_path,
+            mounts: Vec::new(),
+        }
+    }
+
+    pub fn finalize_executable(self) -> Executable {
+        Executable {
+            file: self.storage.into_owned_fd(),
+        }
     }
 }
 
 impl io::Write for ExecutableFactory {
     fn write(&mut self, data: &[u8]) -> io::Result<usize> {
-        let written = write(self.mem_fd.as_raw_fd(), data).map_err(nix_error_to_io_error)?;
-
-        let sha_written = self.sha_state.write(&data[..written])?;
-        assert_eq!(sha_written, written);
-
-        Ok(written)
+        self.storage.write(data)
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        // we always immediately write to the backing storage, so we can leave this empty.
-        Ok(())
+        self.storage.flush()
     }
 }
 
@@ -131,18 +149,20 @@ impl Executable {
         let artifact_file = open(path, OFlag::O_RDONLY | OFlag::O_CLOEXEC, Mode::empty())
             .map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
 
-        Ok(Executable(unsafe { OwnedFd::from_raw_fd(artifact_file) }))
+        Ok(Executable {
+            file: unsafe { OwnedFd::from_raw_fd(artifact_file) },
+        })
     }
 
     pub fn execute(&self, arguments: &[&CStr], env: &[&CStr]) -> io::Result<Void> {
         use nix::fcntl::{AtFlags, FcntlArg, FdFlag};
 
-        fcntl(self.0.as_raw_fd(), FcntlArg::F_SETFD(FdFlag::FD_CLOEXEC))
+        fcntl(self.file.as_raw_fd(), FcntlArg::F_SETFD(FdFlag::FD_CLOEXEC))
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
 
         let program_name = CString::new("").unwrap();
         execveat(
-            self.0.as_raw_fd(),
+            self.file.as_raw_fd(),
             &program_name,
             arguments,
             env,

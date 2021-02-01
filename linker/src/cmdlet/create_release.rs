@@ -12,6 +12,7 @@ use tracing::{event, Level};
 use yscloud_config_model::{
     ApplicationDeploymentTemplate, ArtifactHashSet, DeployedApplicationManifest,
     DeployedPublicService, DeploymentManifest, RegistryEntry, Sandbox, ServiceId,
+    ImageType,
 };
 
 use super::common;
@@ -177,6 +178,7 @@ async fn resolve(
                 provided_remote_services: found.manifest.provided_remote_services,
                 required_local_services,
                 required_remote_services: found.manifest.required_remote_services,
+                image_type: ImageType::Executable,
                 sandbox,
                 extras,
                 artifacts,
@@ -192,7 +194,6 @@ async fn resolve(
 
 #[cfg(test)]
 mod tests {
-
     #[test]
     fn test_staticserver_simple() {
         use std::collections::BTreeMap;
@@ -295,7 +296,7 @@ mod tests {
                     "version_req": "^1.0"
                 },
                 "org.yshi.sfshost.https": {
-                    "package_id": "org.yshi.sfshost.https",
+                    "package_id": "org.yshi.sfshost",
                     "version_req": "^1.0"
                 }
             },

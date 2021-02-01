@@ -5,7 +5,12 @@ use std::path::Path;
 
 use nix::unistd::Pid;
 
+use yscloud_config_model::ImageType;
+
 use crate::{AppPreforkConfiguration, Void};
+
+mod common;
+pub use self::common::{ExecutableFactoryHasher, ExecutableFactoryCommon};
 
 #[cfg(target_os = "linux")]
 mod linux;
@@ -22,7 +27,7 @@ use self::macos as imp;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 mod posix;
 
-#[cfg(any(target_os = "linux"))]
+#[cfg(target_os = "linux")]
 pub use self::linux::container as container;
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -32,46 +37,67 @@ pub use self::imp::{run_reified, ExecExtras, ExecExtrasBuilder};
 pub const EXTENSION: &str = imp::EXTENSION;
 pub const PLATFORM_TRIPLES: &[&str] = imp::PLATFORM_TRIPLES;
 
-pub struct ExecutableFactory(imp::ExecutableFactory);
+pub struct ExecutableFactory {
+    os_impl: imp::ExecutableFactory,
+    common: ExecutableFactoryCommon,
+}
 
 impl ExecutableFactory {
-    pub fn new(name: &str, capacity: i64) -> io::Result<ExecutableFactory> {
-        imp::ExecutableFactory::new(name, capacity).map(ExecutableFactory)
+    pub fn new_unspecified(name: &str, capacity: i64) -> io::Result<ExecutableFactory> {
+        let os_impl = imp::ExecutableFactory::new_unspecified(name, capacity)?;
+        Ok(ExecutableFactory { os_impl, common: Default::default() })
     }
 
-    pub fn validate_sha(&self, sha: &str) -> io::Result<()> {
-        self.0.validate_sha(sha)
+    #[cfg(target_os = "linux")]
+    pub fn new_in_memory(name: &str, capacity: i64) -> io::Result<ExecutableFactory> {
+        let os_impl = imp::ExecutableFactory::new_in_memory(name, capacity)?;
+        Ok(ExecutableFactory { os_impl, common: Default::default() })
     }
 
-    pub fn finalize(self) -> Executable {
-        Executable(self.0.finalize())
+    pub fn new_on_disk(name: &str, capacity: i64, root: &Path) -> io::Result<ExecutableFactory> {
+        let os_impl = imp::ExecutableFactory::new_on_disk(name, capacity, root)?;
+        Ok(ExecutableFactory { os_impl, common: Default::default() })
+    }
+
+    pub fn enable_hasher(&mut self, h: ExecutableFactoryHasher) {
+        self.common.enable_hasher(h)
+    }
+
+    pub fn validate_hash(&self, h: ExecutableFactoryHasher, expect_sha: &str) -> io::Result<()> {
+        self.common.validate_hash(h, expect_sha)
+    }
+
+    pub fn finalize_executable(self) -> Executable {
+        Executable(self.os_impl.finalize_executable())
     }
 }
 
 impl io::Write for ExecutableFactory {
     #[inline]
     fn write(&mut self, data: &[u8]) -> io::Result<usize> {
-        self.0.write(data)
+        let written = self.os_impl.write(data)?;
+        self.common.hash_update(&data[..written]);
+        Ok(written)
     }
 
     #[inline]
     fn flush(&mut self) -> io::Result<()> {
-        self.0.flush()
+        self.os_impl.flush()
     }
 
     #[inline]
     fn write_vectored(&mut self, bufs: &[io::IoSlice]) -> io::Result<usize> {
-        self.0.write_vectored(bufs)
+        self.os_impl.write_vectored(bufs)
     }
 
     #[inline]
     fn write_all(&mut self, buf: &[u8]) -> io::Result<()> {
-        self.0.write_all(buf)
+        self.os_impl.write_all(buf)
     }
 
     #[inline]
     fn write_fmt(&mut self, fmt: fmt::Arguments) -> io::Result<()> {
-        self.0.write_fmt(fmt)
+        self.os_impl.write_fmt(fmt)
     }
 }
 

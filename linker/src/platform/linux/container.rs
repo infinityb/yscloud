@@ -9,8 +9,23 @@ use nix::sched::{unshare, CloneFlags};
 use super::mount::unmount_filesystems;
 use super::unshare::restrict_filesystem;
 
+const BIND_DEFAULT_MOUNT_FLAGS: MsFlags = MsFlags::MS_BIND;
+// const EXPHEMRAL_DEFAULT_MOUNT_FLAGS: MsFlags = MsFlags::MS_NOEXEC | MsFlags::MS_NODEV | MsFlags::MS_NOSUID;
+fn ephemral_default_mount_flags() -> MsFlags {
+    MsFlags::MS_NOEXEC | MsFlags::MS_NODEV | MsFlags::MS_NOSUID
+}
+
 fn nix_error_io(e: nix::Error) -> io::Error {
     io::Error::new(io::ErrorKind::Other, format!("{}", e))
+}
+
+
+// always a bind mount
+pub struct ExtraMount {
+    source_path: PathBuf,
+    destination_path: PathBuf,
+    create_destination: bool,
+    is_read_only: bool,
 }
 
 pub struct Config {
@@ -20,6 +35,7 @@ pub struct Config {
     pub ephemeral_storage_kilobytes: u64,
     pub enable_proc: bool,
     pub enable_dev: bool,
+    pub extra_mounts: Vec<ExtraMount>,
 }
 
 pub fn mount_nix_squashfs(workdir: &Path, config: &Config) -> Result<(), failure::Error> {
@@ -67,13 +83,19 @@ pub fn mount_nix_squashfs(workdir: &Path, config: &Config) -> Result<(), failure
         Some("tmpfs"),
         &root_target,
         Some("tmpfs"),
-        MsFlags::MS_NOEXEC | MsFlags::MS_NODEV | MsFlags::MS_NOSUID,
+        ephemral_default_mount_flags(),
         Some("size=320k"), // half of 640k, not enough for everybody.
     )?;
 
     std::fs::create_dir_all(&old_root_target)?;
     std::fs::create_dir_all(&nix_target)?;
     std::fs::create_dir_all(&persist_target)?;
+
+    for extra in &config.extra_mounts {
+        if extra.create_destination {
+            std::fs::create_dir_all(&extra.destination_path)?;
+        }
+    }
 
     if config.ephemeral_storage_kilobytes > 0 {
         std::fs::create_dir_all(&ephemeral_target)?;
@@ -99,9 +121,24 @@ pub fn mount_nix_squashfs(workdir: &Path, config: &Config) -> Result<(), failure
         Some(&config.persistence_path),
         &persist_target,
         mount_null_str,
-        MsFlags::MS_NOEXEC | MsFlags::MS_NODEV | MsFlags::MS_NOSUID | MsFlags::MS_BIND,
+        BIND_DEFAULT_MOUNT_FLAGS,
         mount_null_str,
     )?;
+
+    for extra in &config.extra_mounts {
+        let mut flags = BIND_DEFAULT_MOUNT_FLAGS;
+        if extra.is_read_only {
+            flags |= MsFlags::MS_RDONLY;
+        }
+
+        nix::mount::mount(
+            Some(&extra.source_path),
+            &extra.destination_path,
+            mount_null_str,
+            flags,
+            mount_null_str,
+        )?;
+    }
 
     if config.ephemeral_storage_kilobytes > 0 {
         let mount_options = format!("size={}k", config.ephemeral_storage_kilobytes);
@@ -109,7 +146,7 @@ pub fn mount_nix_squashfs(workdir: &Path, config: &Config) -> Result<(), failure
             Some("tmpfs"),
             &ephemeral_target,
             Some("tmpfs"),
-            MsFlags::MS_NOEXEC | MsFlags::MS_NODEV | MsFlags::MS_NOSUID,
+            ephemral_default_mount_flags(),
             Some(&mount_options[..]),
         )?;
 
@@ -120,7 +157,7 @@ pub fn mount_nix_squashfs(workdir: &Path, config: &Config) -> Result<(), failure
             Some("proc"),
             &proc_target,
             Some("proc"),
-            MsFlags::MS_NOEXEC | MsFlags::MS_NODEV | MsFlags::MS_NOSUID,
+            ephemral_default_mount_flags(),
             mount_null_str,
         )?;
     }
@@ -137,6 +174,7 @@ pub fn mount_nix_squashfs(workdir: &Path, config: &Config) -> Result<(), failure
 
     pivot_root(&root_target, &old_root_target)?;
     umount2("/.old", MntFlags::MNT_DETACH)?;
+
     if let Err(err) = std::fs::remove_dir("/.old") {
         eprintln!("failed to unmount old-root, continuing anyway");
     }
@@ -145,8 +183,7 @@ pub fn mount_nix_squashfs(workdir: &Path, config: &Config) -> Result<(), failure
         mount_null_str,
         "/",
         mount_null_str,
-        MsFlags::MS_REMOUNT | MsFlags::MS_RDONLY | MsFlags::MS_NOEXEC
-            | MsFlags::MS_NODEV | MsFlags::MS_NOSUID,
+        MsFlags::MS_REMOUNT | MsFlags::MS_RDONLY | ephemral_default_mount_flags(),
         mount_null_str,
     )?;
 

@@ -48,7 +48,10 @@ pub fn get_subcommand() -> App<'static, 'static> {
 }
 
 #[cfg(not(target_os = "linux"))]
-pub fn main(matches: &clap::ArgMatches) {}
+pub fn main(matches: &clap::ArgMatches) {
+    eprintln!("Linux only");
+    panic!();
+}
 
 #[cfg(target_os = "linux")]
 pub fn main(matches: &clap::ArgMatches) {
@@ -67,15 +70,11 @@ pub fn main(matches: &clap::ArgMatches) {
         ephemeral_storage_kilobytes: 0,
         enable_proc: false,
         enable_dev: false,
+        extra_mounts: Vec::new(),
     }).unwrap();
-
-    // let mut xx = io::stdout();
-    // io::copy(&mut File::open("/proc/mounts").unwrap(), &mut xx).unwrap();
 
     Command::new("/nix/entrypoint")
         .args(&["--nofork", "--nopid", "--runasroot", "--config", "/persist/inspircd.config"])
         .spawn().unwrap()
         .wait().unwrap();
-
-    // std::thread::sleep(std::time::Duration::new(1000, 0));
 }

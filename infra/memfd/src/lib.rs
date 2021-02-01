@@ -1,5 +1,6 @@
 #![cfg(target_os = "linux")]
 
+use std::fs::File;
 use std::ffi::{CString, OsStr};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::os::unix::ffi::OsStrExt;
@@ -44,6 +45,12 @@ impl MemFd {
     pub fn get_seals(&self) -> Result<SealFlag, nix::Error> {
         ::nix::fcntl::fcntl(self.as_raw_fd(), FcntlArg::F_GET_SEALS)
             .map(|b| SealFlag::from_bits(b).unwrap())
+    }
+}
+
+impl Into<File> for MemFd {
+    fn into(self) -> File {
+        unsafe { File::from_raw_fd(self.owned_fd.into_raw_fd()) }
     }
 }
 

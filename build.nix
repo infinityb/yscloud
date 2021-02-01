@@ -8,7 +8,7 @@ rustPlatform.buildRustPackage rec {
   buildInputs = [ pkgconfig openssl protobuf rustfmt git libseccomp ];
 
   checkPhase = "";
-  cargoSha256 = "unset";
+  cargoSha256 = "0000000000000000000000000000000000000000000000000000";
   cargoVendorDir = "vendor";
 
   # for pros and tonic
@@ -18,6 +18,6 @@ rustPlatform.buildRustPackage rec {
     description = "yscloud runtime environment";
     license = licenses.unfree;
     maintainers = [ "Stacey Ell <software@e.staceyell.com>" ];
-    platforms = platforms.pc;
+    platforms = platforms.all;
   };
 }
