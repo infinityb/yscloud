@@ -1,0 +1,10 @@
+#!/bin/bash
+set -xe
+
+SCRIPT_BASE=$(cd -- "$(dirname -- "$0")/.."; pwd)
+
+cargo vendor --versioned-dirs >> .cargo/config
+cp ${SCRIPT_BASE}/Cargo.lock ${SCRIPT_BASE}/vendor/Cargo.lock
+tar -zc -C "${SCRIPT_BASE}/.." --exclude .git --exclude target --exclude yscloud-vendor.tar.gz -f "${SCRIPT_BASE}/yscloud-vendor.tar.gz" yscloud
+rm -rf .cargo/config
+

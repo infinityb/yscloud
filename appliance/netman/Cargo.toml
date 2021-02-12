@@ -1,0 +1,23 @@
+[package]
+name = "netman"
+version = "0.1.0"
+authors = ["Stacey Ell <stacey.ell@gmail.com>"]
+edition = "2018"
+
+[dependencies]
+nix = "0.13"
+libc = "0.2.48"
+byteorder = "1"
+copy_arena = "0.1.1"
+im = "14.3.0"
+chrono = "0.4.15"
+time = "0.1.43"
+failure = "*"
+
+futures = "0.3.1"
+env_logger = "0.7.1"
+tokio = { version = "0.2.6", default-features = false, features = ["macros", "rt-core"] }
+netlink-proto = { git = "https://github.com/little-dude/netlink" }
+netlink-packet-core = { git = "https://github.com/little-dude/netlink" }
+netlink-packet-route = { git = "https://github.com/little-dude/netlink" }
+netlink-packet-audit = { git = "https://github.com/little-dude/netlink" }

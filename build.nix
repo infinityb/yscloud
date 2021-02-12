@@ -3,7 +3,7 @@ with import <nixpkgs> { };
 rustPlatform.buildRustPackage rec {
   name = "yscloud-${version}";
   version = "0.2.0";
-  src = ./yscloud.tar.gz;
+  src = ./yscloud-vendor.tar.gz;
   nativeBuildInputs =  [ pkgconfig openssl protobuf rustfmt git libseccomp ];
   buildInputs = [ pkgconfig openssl protobuf rustfmt git libseccomp ];
 

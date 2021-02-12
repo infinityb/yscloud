@@ -4,6 +4,8 @@ members = [
 	# "boss/magnetite-common",
 	# "boss/vfshost",
 	# "boss/webserver",
+	"appliance/init",
+	##needs-maintenance# "appliance/netman",
 	"experiments/linkerclient",
 	"experiments/sni-multiplexor",
 	"experiments/socket-traits",
