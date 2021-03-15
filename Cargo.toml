@@ -7,6 +7,7 @@ members = [
 	"appliance/init",
 	"appliance/netman",
 	"appliance/netman/dhcp",
+	"binhelpers",
 	"experiments/linkerclient",
 	"experiments/sni-multiplexor",
 	"experiments/socket-traits",
