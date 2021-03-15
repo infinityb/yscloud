@@ -351,6 +351,7 @@ fn main2() -> anyhow::Result<()>  {
     nix::unistd::chroot(".")?;
 
     eprintln!("System configured.  No further work, shutting down in 5 seconds.");
+
     sleep(Duration::new(5, 0));
     reboot(RebootMode::RB_POWER_OFF).expect("power off failed");
     Ok(())
