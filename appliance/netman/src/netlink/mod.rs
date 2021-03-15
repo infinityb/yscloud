@@ -11,7 +11,7 @@ use netlink_packet_route::{
 };
 use netlink_proto::{
     new_connection,
-    sys::{Protocol, SocketAddr},
+    sys::SocketAddr,
 };
 
 mod address;

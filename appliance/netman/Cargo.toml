@@ -1,5 +1,5 @@
 [package]
-name = "netman"
+name = "appliance-netman"
 version = "0.1.0"
 authors = ["Stacey Ell <stacey.ell@gmail.com>"]
 edition = "2018"
@@ -13,10 +13,11 @@ im = "14.3.0"
 chrono = "0.4.15"
 time = "0.1.43"
 failure = "*"
+anyhow = "*"
 
-futures = "0.3.1"
+futures = "0.3"
 env_logger = "0.7.1"
-tokio = { version = "0.2.6", default-features = false, features = ["macros", "rt-core"] }
+tokio = { version = "1", features = [ "full" ] }
 netlink-proto = { git = "https://github.com/little-dude/netlink" }
 netlink-packet-core = { git = "https://github.com/little-dude/netlink" }
 netlink-packet-route = { git = "https://github.com/little-dude/netlink" }

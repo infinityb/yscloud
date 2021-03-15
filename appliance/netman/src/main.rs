@@ -30,7 +30,8 @@ use netlink_packet_route::{
 };
 use netlink_proto::{
     new_connection,
-    sys::{Protocol, SocketAddr},
+    sys::SocketAddr,
+    sys::protocols::NETLINK_ROUTE,
 };
 
 mod ip;
@@ -205,7 +206,7 @@ async fn main2() -> Result<(), Box<dyn ::std::error::Error>> {
     // sendto(6, {{len=32, type=RTM_GETLINK, flags=NLM_F_REQUEST|NLM_F_ACK, seq=3, pid=0}, {ifi_family=AF_UNSPEC, ifi_type=ARPHRD_NETROM, ifi_index=if_nametoindex("vshaw0"), ifi_flags=IFF_UP, ifi_change=0x1}}, 32, 0, {sa_family=AF_NETLINK, nl_pid=0, nl_groups=00000000}, 12) = 32
     // sendmsg(3, {msg_name={sa_family=AF_NETLINK, nl_pid=0, nl_groups=00000000}, msg_namelen=12, msg_iov=[{iov_base={{len=32, type=RTM_NEWLINK, flags=NLM_F_REQUEST|NLM_F_ACK, seq=1599521558, pid=0}, {ifi_family=AF_UNSPEC, ifi_type=ARPHRD_NETROM, ifi_index=if_nametoindex("enp4s0"), ifi_flags=IFF_UP, ifi_change=0x1}}, iov_len=32}], msg_iovlen=1, msg_controllen=0, msg_flags=0}, 0)2
 
-    let (conn, mut handle, mut unsol) = new_connection(Protocol::Route)?;
+    let (conn, mut handle, mut unsol) = new_connection(NETLINK_ROUTE)?;
 
     tokio::spawn(conn);
 

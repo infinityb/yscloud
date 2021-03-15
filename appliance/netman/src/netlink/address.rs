@@ -14,7 +14,7 @@ use netlink_packet_route::rtnl::address::nlas::Nla;
 use netlink_packet_route::rtnl::constants::{RTPROT_RA, RT_TABLE_UNSPEC};
 use netlink_proto::{
     new_connection,
-    sys::{Protocol, SocketAddr},
+    sys::SocketAddr,
 };
 
 use super::ValidityPeriod;

@@ -113,7 +113,7 @@ fn test_partition_def_to_path() {
 // }
 
 fn main2() -> anyhow::Result<()>  {
-    std::env::set_var("RUST_BACKTRACE", "1");
+    std::env::set_var("RUST_BACKTRACE", "full");
 
     let config = File::open("/init.config")?;
     let config = BufReader::new(config);
@@ -259,9 +259,9 @@ fn main2() -> anyhow::Result<()>  {
         .spawn()?
         .wait()?;
 
-    // Command::new("/usr/sbin/netman")
-    //     // .args(&[])
-    //     .spawn()?;
+    Command::new("/usr/sbin/netman")
+        // .args(&[])
+        .spawn()?;
     // Command::new("/usr/bin/mount")
     //     // .args(&[])
     //     .spawn()
