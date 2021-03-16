@@ -16,5 +16,5 @@ clap = { version = "2.33.1", default-features = false }
 tracing = "0.1.9"
 tracing-subscriber = "0.1.5"
 
-[build-dependencies]
-tonic-build = "0.3"
+# [build-dependencies]
+# tonic-build = "0.3"

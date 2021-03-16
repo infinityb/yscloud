@@ -149,6 +149,16 @@ rec {
       # File a bug if you depend on any for non-debug work!
       debug = internal.debugCrate { inherit packageId; };
     };
+    "pb-builder" = rec {
+      packageId = "pb-builder";
+      build = internal.buildRustCrateWithFeatures {
+        packageId = "pb-builder";
+      };
+
+      # Debug support which might change between releases.
+      # File a bug if you depend on any for non-debug work!
+      debug = internal.debugCrate { inherit packageId; };
+    };
     "sni-multiplexor" = rec {
       packageId = "sni-multiplexor";
       build = internal.buildRustCrateWithFeatures {
@@ -2681,9 +2691,9 @@ rec {
       };
       "libc" = rec {
         crateName = "libc";
-        version = "0.2.88";
+        version = "0.2.89";
         edition = "2015";
-        sha256 = "0fn7r9r18cghdhjf2181zazlz8wxd00wqxriyr1mx8rh4c47mc03";
+        sha256 = "1iiqm470z1nfrd6i4602i1lf3qr0jakw8y40vpbwvx46alp0k32k";
         authors = [
           "The Rust Project Developers"
         ];
@@ -3043,11 +3053,11 @@ rec {
         };
         resolvedDefaultFeatures = [ "default" "with-deprecated" ];
       };
-      "mio 0.7.9" = rec {
+      "mio 0.7.10" = rec {
         crateName = "mio";
-        version = "0.7.9";
+        version = "0.7.10";
         edition = "2018";
-        sha256 = "0fl271d5s3zvicw21pf2gk6338rskw8l9x0aicmq9cv5417dxpm5";
+        sha256 = "0ffqz2bg0x76wqsnk9c01ad4b8lv13p2r5xikhrgbwxpycia30i1";
         authors = [
           "Carl Lerche <me@carllerche.com>"
           "Thomas de Zeeuw <thomasdezeeuw@gmail.com>"
@@ -4274,6 +4284,25 @@ rec {
         procMacro = true;
         authors = [
           "David Tolnay <dtolnay@gmail.com>"
+        ];
+
+      };
+      "pb-builder" = rec {
+        crateName = "pb-builder";
+        version = "0.1.0";
+        edition = "2018";
+        crateBin = [
+          { name = "pb-builder"; path = "src/main.rs"; }
+        ];
+        src = lib.cleanSourceWith { filter = sourceFilter;  src = ./pb/pb-builder; };
+        authors = [
+          "Stacey Ell <stacey.ell@gmail.com>"
+        ];
+        dependencies = [
+          {
+            name = "tonic-build";
+            packageId = "tonic-build";
+          }
         ];
 
       };
@@ -6748,7 +6777,7 @@ rec {
           }
           {
             name = "mio";
-            packageId = "mio 0.7.9";
+            packageId = "mio 0.7.10";
             optional = true;
           }
           {
@@ -9270,12 +9299,6 @@ rec {
           {
             name = "tracing-subscriber";
             packageId = "tracing-subscriber 0.1.6";
-          }
-        ];
-        buildDependencies = [
-          {
-            name = "tonic-build";
-            packageId = "tonic-build";
           }
         ];
 

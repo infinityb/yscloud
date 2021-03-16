@@ -20,6 +20,7 @@ members = [
 	"ksuid/cli",
 	"linker",
 	"parsing/tls",
+	"pb/pb-builder",
 	"webserver",
 	"webserver/hello-world",
 	"yscloud-config-model",

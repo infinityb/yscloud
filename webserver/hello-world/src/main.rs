@@ -13,7 +13,10 @@ const CARGO_PKG_VERSION: &str = env!("CARGO_PKG_VERSION");
 const CARGO_PKG_NAME: &str = env!("CARGO_PKG_NAME");
 
 mod pb {
-    tonic::include_proto!("org.yshi.certificate_issuer.v1");
+    // tonic::include_proto!("org.yshi.certificate_issuer.v1");
+    include!(concat!(
+        env!("CERTIFICATE_ISSUER_PATH"),
+        concat!("/", "org.yshi.certificate_issuer.v1.rs")));
 }
 
 #[tokio::main]
