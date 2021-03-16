@@ -6,15 +6,22 @@ use std::thread::sleep;
 use std::time::Duration;
 use std::path::PathBuf;
 
-use nix::sys::reboot::{reboot, RebootMode};
-use nix::mount::{MsFlags, mount};
 use tracing::{event, Level};
 use tracing_subscriber::filter::LevelFilter as TracingLevelFilter;
 use tracing_subscriber::FmtSubscriber;
 
 const NONE_OF_SLICE: Option<&'static [u8]> = None;
 
+
+#[cfg(not(target_os = "linux"))]
 fn main() {
+    panic!("linux only");
+}
+
+#[cfg(target_os = "linux")]
+fn main() {
+    use nix::sys::reboot::{reboot, RebootMode};
+
     if let Err(err) = main2() {
         eprintln!("{:?}", err);
         eprintln!("{}", err);
@@ -112,7 +119,11 @@ fn test_partition_def_to_path() {
 //     }
 // }
 
-fn main2() -> anyhow::Result<()>  {
+#[cfg(target_os = "linux")]
+fn main2() -> anyhow::Result<()> {
+    use nix::sys::reboot::{reboot, RebootMode};
+    use nix::mount::{MsFlags, mount};
+
     std::env::set_var("RUST_BACKTRACE", "full");
 
     let config = File::open("/init.config")?;
