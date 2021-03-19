@@ -14,6 +14,7 @@ chrono = "0.4.15"
 time = "0.1.43"
 failure = "*"
 anyhow = "*"
+binhelpers = { path = "../../binhelpers" }
 
 futures = "0.3"
 env_logger = "0.7.1"

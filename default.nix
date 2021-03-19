@@ -1,6 +1,7 @@
 with (import <nixpkgs> {});
 let
   pb = import ./pb;
+  appliance = import ./appliance;
   iconvOptional = lib.optionals stdenv.isDarwin [pkgs.libiconv];
   darwinHack = attrs: { buildInputs = iconvOptional; };
   generatedBuild = callPackage ./Cargo.nix {
@@ -13,4 +14,6 @@ let
       "sni-multiplexor" = darwinHack;
     };
   };
-in generatedBuild
+in generatedBuild // {
+  appliance = appliance;
+}

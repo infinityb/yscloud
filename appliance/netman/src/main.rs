@@ -253,9 +253,17 @@ async fn main2() -> Result<(), Box<dyn ::std::error::Error>> {
     //     },
     // }).await?;
 
+    let mut ip_command = "ip";
+    if Path::new("/bin/ip").exists() {
+        ip_command = "/bin/ip";
+    }
+    if Path::new("/usr/sbin/ip").exists() {
+        ip_command = "/usr/sbin/ip";
+    }
+
     ::std::thread::sleep_ms(1000);
 
-    Command::new("/usr/sbin/ip")
+    Command::new(ip_command)
         .args(&["addr", "show"])
         .spawn()
         .expect("failed to execute process")
@@ -330,7 +338,7 @@ async fn main2() -> Result<(), Box<dyn ::std::error::Error>> {
         let mut interfaces = HashMap::new();
         let response = list_interfaces(&mut handle, ListInterfaceRequest {}).await?;
         for iface in &response.interfaces {
-            println!("interface[]={:?}", iface);
+            // println!("interface[]={:?}", iface);
             interfaces.insert(iface.index, iface.clone());
         }
 
@@ -381,26 +389,26 @@ async fn main2() -> Result<(), Box<dyn ::std::error::Error>> {
         } else {
             
         }
-        add_address(&mut handle, AddAddressRequest {
-            address: AddressSpec {
-                iface_index: meta.interface_index,
-                address: IpAddr::V6(computed_ip_addr),
-                prefix_len: prefix_length,
-            },
-            preferred_until: None,
-            valid_until: None,
-        }).await?;
+        // add_address(&mut handle, AddAddressRequest {
+        //     address: AddressSpec {
+        //         iface_index: meta.interface_index,
+        //         address: IpAddr::V6(computed_ip_addr),
+        //         prefix_len: prefix_length,
+        //     },
+        //     preferred_until: None,
+        //     valid_until: None,
+        // }).await?;
 
         //       5254:0012:34:56
         // fec0::5054:ff:fe12:3456
         println!("");
 
-        Command::new("/usr/sbin/ip")
-            .args(&["addr", "show"])
-            .spawn()
-            .expect("failed to execute process")
-            .wait()
-            .expect("failed to execute process");
+        // Command::new(ip_command)
+        //     .args(&["addr", "show"])
+        //     .spawn()
+        //     .expect("failed to execute process")
+        //     .wait()
+        //     .expect("failed to execute process");
 
         println!("");
     }
@@ -614,7 +622,7 @@ mod sockopt {
             let Icmp6FilterType(type_) = type_;
             let type_major = type_ >> 5;
             let type_minor = type_ & 31;
-            self.0[type_major as usize] &= 0xFFFF_FFFF ^ (1 << type_minor);
+            self.0[type_major as usize] &= (0xFFFF_FFFF_u32 ^ (1 << type_minor));
         }
     }
 
@@ -641,13 +649,13 @@ mod sockopt {
         let mut i6f = Icmp6FilterValue::block_all();
         i6f.set_pass(super::sockopt::ND_ROUTER_SOLICIT);
         i6f.set_pass(super::sockopt::ND_ROUTER_ADVERT);
-        assert_eq!(i6f.0[0], 0xffff_ffff);
-        assert_eq!(i6f.0[1], 0xffff_ffff);
-        assert_eq!(i6f.0[2], 0xffff_ffff);
-        assert_eq!(i6f.0[3], 0xffff_ffff);
-        assert_eq!(i6f.0[4], 0x9fff_ffff);
-        assert_eq!(i6f.0[5], 0xffff_ffff);
-        assert_eq!(i6f.0[6], 0xffff_ffff);
-        assert_eq!(i6f.0[7], 0xffff_ffff);
+        assert_eq!(i6f.0[0], 0xFFFF_FFFF_u32.to_be());
+        assert_eq!(i6f.0[1], 0xFFFF_FFFF_u32.to_be());
+        assert_eq!(i6f.0[2], 0xFFFF_FFFF_u32.to_be());
+        assert_eq!(i6f.0[3], 0xFFFF_FFFF_u32.to_be());
+        assert_eq!(i6f.0[4], 0x9FFF_FFFF_u32.to_be());
+        assert_eq!(i6f.0[5], 0xFFFF_FFFF_u32.to_be());
+        assert_eq!(i6f.0[6], 0xFFFF_FFFF_u32.to_be());
+        assert_eq!(i6f.0[7], 0xFFFF_FFFF_u32.to_be());
     }
 }

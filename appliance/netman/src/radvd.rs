@@ -236,7 +236,7 @@ impl fmt::Debug for LinkLayerAddress {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Mtu {
     mtu: u32,
 }
@@ -253,7 +253,9 @@ impl<'arena> ByteIterRead<'arena> for Mtu {
 
         let mut mtu_buf: [u8; 4] = [0; 4];
         mtu_buf.copy_from_slice(&buf[2..]);
-        let mtu = u32::from_ne_bytes(mtu_buf);
+        let mtu = u32::from_be_bytes(mtu_buf); // ???
+
+        eprintln!("mtu_buf = {:?}", mtu_buf);
 
         if reserved1 != 0 {
             return Err(Error{});
@@ -263,14 +265,6 @@ impl<'arena> ByteIterRead<'arena> for Mtu {
     }
 }
 
-impl fmt::Debug for Mtu {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let mtu = self.mtu.to_be();
-        f.debug_struct("Mtu")
-            .field("mtu", &mtu)
-            .finish()
-    }
-}
 
 impl<'arena> ByteIterRead<'arena> for std::net::Ipv6Addr {
     type Error = Error;
@@ -368,55 +362,189 @@ const OPTION_DNS_SEARCH_LIST: u8 = 31;
 #[cfg(test)]
 mod tests {
     use std::mem;
-    use super::{RouterAdvertisement, ByteIterRead};
+    use super::{Mtu, RouterAdvertisement, RouterAdvertisementOption, ByteIterRead};
     use copy_arena::{Arena, Allocator};
 
+    use binhelpers::rhexdump;
+
     // HE
-    const ADVERT1: &[u8] = &[
-        134, 0, 105, 118, 64, 0, 0, 30, 0, 0, 0, 0, 0, 0, 0, 0, 3, 4, 64, 224, 0, 0, 1, 44, 0, 0,
-        0, 180, 0, 0, 0, 0, 32, 1, 4, 112, 0, 11, 1, 233, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 80, 4,
-        177, 173, 35,
-    ];
+    const ADVERT1: &[u8] = rhexdump!(r#"
+        00000000: 8600 6976 4000 001e 0000 0000 0000 0000  ..iv@...........
+        00000010: 0304 40e0 0000 012c 0000 00b4 0000 0000  ..@....,........
+        00000020: 2001 0470 000b 01e9 0000 0000 0000 0000   ..p............
+        00000030: 0101 0050 04b1 ad23                      ...P...#
+    "#);
 
     #[test]
     fn advert1_print() {
         let mut arena = Arena::new();
         let mut allocator = arena.allocator();
         let x = RouterAdvertisement::read_byte_iter(&mut allocator, &mut ADVERT1.iter()).unwrap();
-        panic!("{:#?}", x);
+        assert_eq!(x.type_, 0x86);
+        assert_eq!(x.code, 0);
+        assert_eq!(x.checksum, 0x6976);
+        assert_eq!(x.cur_hop_limit, 64);
+        assert_eq!(x.flags1, 0);
+        assert_eq!(x.router_lifetime, 30);
+        assert_eq!(x.reachable_time, 0);
+        assert_eq!(x.retrans_timer, 0);
+        assert_eq!(x.options.len(), 2);
+
+        if let RouterAdvertisementOption::PrefixInformation(pi) = x.options[0] {
+            eprintln!("option 0: {:?}", pi);
+            assert_eq!(pi.prefix_length, 64);
+            assert_eq!(pi.flags1, 224);
+            assert_eq!(pi.valid_lifetime, 300);
+            assert_eq!(pi.preferred_lifetime, 180);
+            assert_eq!(pi.reserved2, 0);
+            assert_eq!(format!("{}", pi.prefix), "2001:470:b:1e9::");
+        } else {
+            panic!("unexpected");
+        }
+
+        if let RouterAdvertisementOption::SourceLinkLayerAddress(slla) = x.options[1] {
+            eprintln!("option 1: {:?}", slla);
+
+            // peak laziness.
+            assert_eq!(format!("{:?}", slla), "LinkLayerAddress(MacAddr([0x0, 0x50, 0x4, 0xb1, 0xad, 0x23]))");
+        } else {
+            panic!("unexpected");
+        }
     }
 
     // Shaw
-    const ADVERT2: &[u8] = &[
-        134, 0, 215, 59, 64, 64, 0, 30, 0, 0, 0, 0, 0, 0, 0, 0, 3, 4, 64, 224, 0, 1, 81, 128, 0, 0,
-        56, 64, 0, 0, 0, 0, 38, 4, 61, 9, 42, 127, 158, 1, 0, 0, 0, 0, 0, 0, 0, 0, 31, 5, 0, 0, 0,
-        0, 0, 10, 7, 121, 121, 99, 45, 105, 110, 116, 17, 121, 97, 115, 97, 115, 104, 105, 105,
-        115, 121, 110, 100, 105, 99, 97, 116, 101, 3, 111, 114, 103, 0, 0, 5, 1, 0, 0, 0, 0, 5,
-        220, 1, 1, 0, 13, 185, 76, 238, 254,
-    ];
+    const ADVERT2: &[u8] = rhexdump!(r#"
+        00000000: 8600 d73b 4040 001e 0000 0000 0000 0000  ...;@@..........
+        00000010: 0304 40e0 0001 5180 0000 3840 0000 0000  ..@...Q...8@....
+        00000020: 2604 3d09 2a7f 9e01 0000 0000 0000 0000  &.=.*...........
+        00000030: 1f05 0000 0000 000a 0779 7963 2d69 6e74  .........yyc-int
+        00000040: 1179 6173 6173 6869 6973 796e 6469 6361  .yasashiisyndica
+        00000050: 7465 036f 7267 0000 0501 0000 0000 05dc  te.org..........
+        00000060: 0101 000d b94c eefe                      .....L..
+    "#);
 
     #[test]
     fn advert2_print() {
         let mut arena = Arena::new();
         let mut allocator = arena.allocator();
         let x = RouterAdvertisement::read_byte_iter(&mut allocator, &mut ADVERT2.iter()).unwrap();
-        panic!("{:#?}", x);
+        
+        assert_eq!(x.type_, 0x86);
+        assert_eq!(x.code, 0);
+        assert_eq!(x.checksum, 0xd73b);
+        assert_eq!(x.cur_hop_limit, 64);
+        assert_eq!(x.flags1, 64);
+        assert_eq!(x.router_lifetime, 30);
+        assert_eq!(x.reachable_time, 0);
+        assert_eq!(x.retrans_timer, 0);
+        assert_eq!(x.options.len(), 4);
+
+        eprintln!("x = {:#?}", x);
+
+        if let RouterAdvertisementOption::PrefixInformation(pi) = x.options[0] {
+            eprintln!("option 0: {:?}", pi);
+            assert_eq!(pi.prefix_length, 64);
+            assert_eq!(pi.flags1, 224);
+            assert_eq!(pi.valid_lifetime, 86400);
+            assert_eq!(pi.preferred_lifetime, 14400);
+            assert_eq!(pi.reserved2, 0);
+            assert_eq!(format!("{}", pi.prefix), "2604:3d09:2a7f:9e01::");
+        } else {
+            panic!("unexpected");
+        }
+
+        if let RouterAdvertisementOption::DnsSearchList(search_vec) = x.options[1] {
+            eprintln!("option 1: {:?}", search_vec);
+            assert_eq!(search_vec, &[
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x0a, 0x07, 0x79, 0x79, 0x63,
+                0x2d, 0x69, 0x6e, 0x74, 0x11, 0x79, 0x61, 0x73, 0x61, 0x73,
+                0x68, 0x69, 0x69, 0x73, 0x79, 0x6e, 0x64, 0x69, 0x63, 0x61,
+                0x74, 0x65, 0x03, 0x6f, 0x72, 0x67, 0x00, 0x00
+            ]);
+        } else {
+            panic!("unexpected");
+        }
+
+        if let RouterAdvertisementOption::Mtu(m) = x.options[2] {
+            eprintln!("option 2: {:?} == {:?}", m, Mtu { mtu: 1500 });
+            assert_eq!(m, Mtu { mtu: 1500 });
+        } else {
+            panic!("unexpected");
+        }
+
+        if let RouterAdvertisementOption::SourceLinkLayerAddress(slla) = x.options[3] {
+            eprintln!("option 3: {:?}", slla);
+            assert_eq!(format!("{:?}", slla), "LinkLayerAddress(MacAddr([0x0, 0xd, 0xb9, 0x4c, 0xee, 0xfe]))");
+        } else {
+            panic!("unexpected");
+        }
     }
 
     // Telus
-    const ADVERT3: &[u8] = &[
-        134, 0, 66, 208, 64, 64, 0, 30, 0, 0, 0, 0, 0, 0, 0, 0, 3, 4, 64, 224, 0, 1, 81, 128, 0, 0,
-        56, 64, 0, 0, 0, 0, 32, 1, 5, 106, 113, 181, 59, 1, 0, 0, 0, 0, 0, 0, 0, 0, 31, 5, 0, 0, 0,
-        0, 0, 10, 7, 121, 121, 99, 45, 105, 110, 116, 17, 121, 97, 115, 97, 115, 104, 105, 105,
-        115, 121, 110, 100, 105, 99, 97, 116, 101, 3, 111, 114, 103, 0, 0, 5, 1, 0, 0, 0, 0, 5,
-        220, 1, 1, 0, 13, 185, 76, 229, 234,
-    ];
+    const ADVERT3: &[u8] = rhexdump!(r#"
+        00000000: 8600 42d0 4040 001e 0000 0000 0000 0000  ..B.@@..........
+        00000010: 0304 40e0 0001 5180 0000 3840 0000 0000  ..@...Q...8@....
+        00000020: 2001 056a 71b5 3b01 0000 0000 0000 0000   ..jq.;.........
+        00000030: 1f05 0000 0000 000a 0779 7963 2d69 6e74  .........yyc-int
+        00000040: 1179 6173 6173 6869 6973 796e 6469 6361  .yasashiisyndica
+        00000050: 7465 036f 7267 0000 0501 0000 0000 05dc  te.org..........
+        00000060: 0101 000d b94c e5ea                      .....L..
+    "#);
 
     #[test]
     fn advert3_print() {
         let mut arena = Arena::new();
         let mut allocator = arena.allocator();
         let x = RouterAdvertisement::read_byte_iter(&mut allocator, &mut ADVERT3.iter()).unwrap();
-        panic!("{:#?}", x);
+        
+        assert_eq!(x.type_, 0x86);
+        assert_eq!(x.code, 0);
+        assert_eq!(x.checksum, 0x42d0);
+        assert_eq!(x.cur_hop_limit, 64);
+        assert_eq!(x.flags1, 64);
+        assert_eq!(x.router_lifetime, 30);
+        assert_eq!(x.reachable_time, 0);
+        assert_eq!(x.retrans_timer, 0);
+        assert_eq!(x.options.len(), 4);
+
+        eprintln!("x = {:#?}", x);
+
+        if let RouterAdvertisementOption::PrefixInformation(pi) = x.options[0] {
+            eprintln!("option 0: {:?}", pi);
+            assert_eq!(pi.prefix_length, 64);
+            assert_eq!(pi.flags1, 224);
+            assert_eq!(pi.valid_lifetime, 86400);
+            assert_eq!(pi.preferred_lifetime, 14400);
+            assert_eq!(pi.reserved2, 0);
+            assert_eq!(format!("{}", pi.prefix), "2001:56a:71b5:3b01::");
+        } else {
+            panic!("unexpected");
+        }
+
+        if let RouterAdvertisementOption::DnsSearchList(search_vec) = x.options[1] {
+            eprintln!("option 1: {:?}", search_vec);
+            assert_eq!(search_vec, &[
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x0a, 0x07, 0x79, 0x79, 0x63,
+                0x2d, 0x69, 0x6e, 0x74, 0x11, 0x79, 0x61, 0x73, 0x61, 0x73,
+                0x68, 0x69, 0x69, 0x73, 0x79, 0x6e, 0x64, 0x69, 0x63, 0x61,
+                0x74, 0x65, 0x03, 0x6f, 0x72, 0x67, 0x00, 0x00
+            ]);
+        } else {
+            panic!("unexpected");
+        }
+
+        if let RouterAdvertisementOption::Mtu(m) = x.options[2] {
+            eprintln!("option 2: {:?} == {:?}", m, Mtu { mtu: 1500 });
+            assert_eq!(m, Mtu { mtu: 1500 });
+        } else {
+            panic!("unexpected");
+        }
+
+        if let RouterAdvertisementOption::SourceLinkLayerAddress(slla) = x.options[3] {
+            eprintln!("option 3: {:?}", slla);
+            assert_eq!(format!("{:?}", slla), "LinkLayerAddress(MacAddr([0x0, 0xd, 0xb9, 0x4c, 0xe5, 0xea]))");
+        } else {
+            panic!("unexpected");
+        }
     }
 }

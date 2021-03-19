@@ -72,6 +72,7 @@ name = "appliance-netman"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "binhelpers",
  "byteorder",
  "chrono",
  "copy_arena",
