@@ -14,6 +14,19 @@
     fileSystems = {};
   };
 
+  networking.enableIPv6 = true;
+  networking.useDHCP = true;
+  networking.dhcpcd.persistent = true;
+  networking.firewall.enable = false;
+
+  services.hydra = {
+    enable = true;
+    hydraURL = "http://localhost:3000";
+    notificationSender = "hydra@localhost";
+    buildMachinesFiles = [];
+    useSubstitutes = true;
+  };
+
   # "shark123123"
   users.users."root".initialHashedPassword = "$6$3eNw0.fMLD0e281n$9g4geVRlsxipj09D2x1LED2yq6mg02jCsS2kZDzK6.rhrtIfoO2eb6oK27a9TUUNKxgiYEN4zTL51pTsZt8f8.";
 

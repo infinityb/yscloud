@@ -128,6 +128,8 @@ in rec {
     (test ! -e ./persist.qcow2 && cp ${persistFilesystemQemu} ./persist.qcow2; true)
     ${pkgs.cloud-hypervisor}/bin/cloud-hypervisor \
       --serial tty --console off \
+      --cpus boot=12 \
+      --memory size=12000M \
       --kernel=${pkgs.linuxPackages.kernel}/bzImage \
       --initramfs=${initrd}/initrd.gz \
       --disk path=./persist.qcow2,readonly=off \
@@ -139,6 +141,8 @@ in rec {
     ''
     ${pkgs.cloud-hypervisor}/bin/cloud-hypervisor \
       --serial tty --console off \
+      --cpus boot=4 \
+      --memory size=1024M \
       --kernel=${pkgs.linuxPackages.kernel}/bzImage \
       --initramfs=${initrd}/initrd.gz \
       --disk path=${platformImage},readonly=on,id=0 \

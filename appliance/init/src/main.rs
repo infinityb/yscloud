@@ -412,7 +412,7 @@ fn main2() -> anyhow::Result<()> {
             Some("/dev/disk/by-label/persist"),
             "/_next-root/persist",
             Some("ext4"),
-            MsFlags::empty(),
+            MsFlags::MS_NOEXEC | MsFlags::MS_NOSUID | MsFlags::MS_NODEV,
             NONE_OF_SLICE,
         )?;
 
