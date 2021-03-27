@@ -16,10 +16,13 @@ let
   modulesClosure = pkgs.makeModulesClosure {
     rootModules = [
       # Standard hardware
-      "igb" "ixgbe"
+      "igb" "ixgbe" "e1000"
 
-      # Qemu-compatibility
-      "virtio-net" "virtio-pci" "virtio-blk" "virtio-scsi"
+      # disk
+      "dm_verity" "dm_mod" "loop"
+
+      # Virtualization compatibility
+      "virtio-net" "virtio-pci" "virtio-blk" "virtio-scsi" "virtio_rng"
 
       "squashfs"
       "overlay"
@@ -30,22 +33,11 @@ let
   };
 
 in rec {
-  # platformImage = makeSquashImage {
-  #   configuration = {
-  #     packages = [
-  #       rustSource.allWorkspaceMembers
-  #       pkgs.linuxPackages.kernel
-
-  #       pkgs.zfs
-  #       pkgs.linuxPackages.zfs
-  #     ];
-  #   };
-  # };
-
   platformImage = import ./platform-image.nix {
     configuration = ./sample.nix;
     extraPackages = [
       rustSource.allWorkspaceMembers
+      pkgs.cryptsetup
       pkgs.zfs
     ];
   };
@@ -54,6 +46,22 @@ in rec {
     envVariable = true;
   } ''
     ${pkgs.qemu}/bin/qemu-img convert -f raw -O qcow2 ${platformImage} $out
+  '';
+
+  persistFilesystemRaw = pkgs.runCommand "persist-filesystem" {
+    envVariable = true;
+  } ''
+    set -e
+    ${pkgs.coreutils}/bin/mkdir rootfs
+    # use cow if we can (`--reflink=auto`) otherwise fall back to copy
+    ${pkgs.coreutils}/bin/cp --reflink=auto ${platformImage} rootfs/nix-store.squashfs
+    ${pkgs.e2fsprogs}/bin/mke2fs -L persist -d rootfs $out 16G
+  '';
+
+  persistFilesystemQemu = pkgs.runCommand "persist-filesystem-qcow2" {
+    envVariable = true;
+  } ''
+    ${pkgs.qemu}/bin/qemu-img convert -f raw -O qcow2 ${persistFilesystemRaw} $out
   '';
 
   # HACK: add ${pkgs.linuxPackages.zfs} here if we need the zfs modules
@@ -70,6 +78,9 @@ in rec {
       MKDIR /usr/sbin
       LINK /usr/sbin/sysctl ${pkgs.busybox}/bin/sysctl
       LINK /usr/sbin/ip ${pkgs.busybox}/bin/ip
+      LINK /usr/sbin/losetup ${pkgs.busybox}/bin/losetup
+      LINK /usr/sbin/modprobe ${pkgs.kmod}/bin/modprobe
+      LINK /usr/bin/find ${pkgs.busybox}/bin/find
       LINK /usr/sbin/netman ${rustSource.workspaceMembers."appliance-netman".build}/bin/appliance-netman
       MKDIR /bin
       LINK /bin/bash ${pkgs.bash}/bin/bash
@@ -90,24 +101,48 @@ in rec {
 
   startScriptQemu = pkgs.writeScriptBin "run-vm"
     ''
-    qemu-system-x86_64 \
+    ${pkgs.qemu}/bin/qemu-system-x86_64 \
       -m 4000 \
       -nographic -serial mon:stdio \
-      -append 'console=ttyS0 nixos-system=${platformImage.toplevel}' \
+      -append 'console=ttyS0 root=/dev/disk/by-path/virtio-pci-0000:00:04.0 nixos-system=${platformImage.toplevel}' \
       -netdev user,id=n1 -device virtio-net-pci,netdev=n1 \
       -kernel ${pkgs.linuxPackages.kernel}/bzImage \
       -drive format=qcow2,if=virtio,file=${platformImageQcow2},readonly=on \
       -initrd ${initrd}/initrd.gz
     '';
 
-  # startScriptFirecracker = pkgs.writeScriptBin "run-vm"
-  #   ''
-  #   ${pkgs.firectl}/bin/firectl -c4 -m1024 \
-  #     --firecracker-binary=${pkgs.firecracker}/bin/firecracker \
-  #     --kernel=${pkgs.linuxPackages.kernel}/bzImage \
-  #     --root-drive=${initrd}/initrd.gz \
-  #     --cpu-template=T2 \
-  #     --firecracker-log=firecracker-vmm.log \
-  #     --kernel-opts="console=ttyS0 noapic reboot=k panic=1 pci=off rw"
-  #   '';
+  startScriptFirecracker = pkgs.writeScriptBin "run-vm"
+    ''
+    ${pkgs.firectl}/bin/firectl -c4 -m1024 \
+      --firecracker-binary=${pkgs.firecracker}/bin/firecracker \
+      --kernel=${pkgs.linuxPackages.kernel}/bzImage \
+      --root-drive=${initrd}/initrd.gz \
+      --cpu-template=T2 \
+      --firecracker-log=firecracker-vmm.log \
+      --kernel-opts="console=ttyS0 nixos-system=${platformImage.toplevel} noapic reboot=k panic=1 pci=off rw"
+    '';
+
+  startScriptCloudHypervisor = pkgs.writeScriptBin "run-vm"
+    ''
+
+    (test ! -e ./persist.qcow2 && cp ${persistFilesystemQemu} ./persist.qcow2; true)
+    ${pkgs.cloud-hypervisor}/bin/cloud-hypervisor \
+      --serial tty --console off \
+      --kernel=${pkgs.linuxPackages.kernel}/bzImage \
+      --initramfs=${initrd}/initrd.gz \
+      --disk path=./persist.qcow2,readonly=off \
+      --net "tap=,mac=,ip=,mask=" --rng \
+      --cmdline="console=ttyS0 yscloud.personality=persist root=/dev/vda nixos-system=${platformImage.toplevel}"
+    '';
+
+  startScriptCloudHypervisorTest = pkgs.writeScriptBin "run-vm"
+    ''
+    ${pkgs.cloud-hypervisor}/bin/cloud-hypervisor \
+      --serial tty --console off \
+      --kernel=${pkgs.linuxPackages.kernel}/bzImage \
+      --initramfs=${initrd}/initrd.gz \
+      --disk path=${platformImage},readonly=on,id=0 \
+      --net "tap=,mac=,ip=,mask=" --rng \
+      --cmdline="console=ttyS0 root=/dev/vda nixos-system=${platformImage.toplevel}"
+    '';
 }

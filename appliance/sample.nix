@@ -11,19 +11,7 @@
 
   virtualisation = {
     writableStore = true;
-    fileSystems = {
-      # "/nix/.rw-store" = {
-      #   fsType = "tmpfs";
-      #   options = [ "mode=0755" ];
-      #   neededForBoot = true;
-      # };
-      # "/nix/.ro-store" = {
-      #   device = "/dev/disk/by-path/virtio-pci-0000:00:04.0";
-      #   fsType = "squashfs";
-      #   options = [ "loop" ];
-      #   neededForBoot = true;
-      # };
-    };
+    fileSystems = {};
   };
 
   # "shark123123"
@@ -38,6 +26,4 @@
     ];
     initialHashedPassword = "$6$3eNw0.fMLD0e281n$9g4geVRlsxipj09D2x1LED2yq6mg02jCsS2kZDzK6.rhrtIfoO2eb6oK27a9TUUNKxgiYEN4zTL51pTsZt8f8.";
   };
-
-  # environment.kernelModules = [ "loop" "overlay" "zfs" ];
 }

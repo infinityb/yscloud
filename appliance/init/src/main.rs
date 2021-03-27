@@ -1,4 +1,4 @@
-use std::fs::{self, File};
+use std::fs::{self, File, FileType};
 use std::io::{self, Read, BufReader, BufRead};
 use std::path::Path;
 use std::process::Command;
@@ -277,7 +277,8 @@ fn main2() -> anyhow::Result<()> {
 
     let _udev = Command::new("/lib/systemd/systemd-udevd")
         .args(&["--daemon", "--resolve-names=never"])
-        .spawn()?;
+        .spawn()
+        .with_context(|| format!("{}:{}", file!(), line!()))?;
 
     Command::new("/usr/sbin/sysctl")
         .args(&[
@@ -287,18 +288,24 @@ fn main2() -> anyhow::Result<()> {
             "net.ipv6.conf.default.autoconf=0",
             "net.ipv6.conf.default.accept_ra=1",
         ])
-        .spawn()?
-        .wait()?;
+        .spawn()
+        .with_context(|| format!("{}:{}", file!(), line!()))?
+        .wait()
+        .with_context(|| format!("{}:{}", file!(), line!()))?;
 
     Command::new("/usr/bin/udevadm")
         .args(&["trigger", "--type=subsystems", "--action=add"])
-        .spawn()?
-        .wait()?;
+        .spawn()
+        .with_context(|| format!("{}:{}", file!(), line!()))?
+        .wait()
+        .with_context(|| format!("{}:{}", file!(), line!()))?;
 
     Command::new("/usr/bin/udevadm")
         .args(&["trigger", "--type=devices", "--action=add"])
-        .spawn()?
-        .wait()?;
+        .spawn()
+        .with_context(|| format!("{}:{}", file!(), line!()))?
+        .wait()
+        .with_context(|| format!("{}:{}", file!(), line!()))?;
 
     Command::new("/usr/bin/udevadm")
         .args(&["settle"])
@@ -313,7 +320,8 @@ fn main2() -> anyhow::Result<()> {
     //     .spawn()
     //     .expect("failed to execute process");
 
-    fs::create_dir("/_next-root")?;
+    fs::create_dir("/_next-root")
+        .with_context(|| format!("{}:{}", file!(), line!()))?;
 
     mount(
         NONE_OF_SLICE,
@@ -323,19 +331,33 @@ fn main2() -> anyhow::Result<()> {
         Some("size=8388608k")
     )?;
 
-    fs::create_dir("/_next-root/dev")?;
-    fs::create_dir("/_next-root/images")?;
-    fs::create_dir("/_next-root/nix")?;
-    fs::create_dir("/_next-root/nix/store")?;
-    fs::create_dir("/_next-root/proc")?;
-    fs::create_dir("/_next-root/run")?;
-    fs::create_dir("/_next-root/sys")?;
-    fs::create_dir("/_next-root/usr")?;
-    fs::create_dir("/_next-root/tmp")?;
+    fs::create_dir("/_next-root/dev")
+        .with_context(|| format!("{}:{}", file!(), line!()))?;
+    fs::create_dir("/_next-root/images")
+        .with_context(|| format!("{}:{}", file!(), line!()))?;
+    fs::create_dir("/_next-root/nix")
+        .with_context(|| format!("{}:{}", file!(), line!()))?;
+    fs::create_dir("/_next-root/nix/store")
+        .with_context(|| format!("{}:{}", file!(), line!()))?;
+    fs::create_dir("/_next-root/proc")
+        .with_context(|| format!("{}:{}", file!(), line!()))?;
+    fs::create_dir("/_next-root/run")
+        .with_context(|| format!("{}:{}", file!(), line!()))?;
+    fs::create_dir("/_next-root/sys")
+        .with_context(|| format!("{}:{}", file!(), line!()))?;
+    fs::create_dir("/_next-root/usr")
+        .with_context(|| format!("{}:{}", file!(), line!()))?;
+    fs::create_dir("/_next-root/tmp")
+        .with_context(|| format!("{}:{}", file!(), line!()))?;
+    fs::create_dir("/_next-root/persist")
+        .with_context(|| format!("{}:{}", file!(), line!()))?;
 
-    fs::create_dir("/_next-root/nix/.rw-store")?;
-    fs::create_dir("/_next-root/nix/.ro-store")?;
-    fs::create_dir("/_next-root/.old")?;
+    fs::create_dir("/_next-root/nix/.rw-store")
+        .with_context(|| format!("{}:{}", file!(), line!()))?;
+    fs::create_dir("/_next-root/nix/.ro-store")
+        .with_context(|| format!("{}:{}", file!(), line!()))?;
+    fs::create_dir("/_next-root/.old")
+        .with_context(|| format!("{}:{}", file!(), line!()))?;
 
     // mount(
     //     NONE_OF_SLICE,
@@ -359,13 +381,16 @@ fn main2() -> anyhow::Result<()> {
     //     Some("tmpfs"),
     //     MsFlags::MS_NOSUID | MsFlags::MS_NODEV,
     //     Some("size=8388608k")
-    // )?;
-    fs::create_dir("/_next-root/nix/.rw-store/store")?;
-    fs::create_dir("/_next-root/nix/.rw-store/work")?;
+    // )
+    fs::create_dir("/_next-root/nix/.rw-store/store")
+        .with_context(|| format!("{}:{}", file!(), line!()))?;
+    fs::create_dir("/_next-root/nix/.rw-store/work")
+        .with_context(|| format!("{}:{}", file!(), line!()))?;
 
-    let modules = vec!["squashfs", "overlay", "ext4"];
+
+    let modules = vec!["squashfs", "overlay", "ext4", "loop"];
     for module in modules {
-        Command::new("/nix/store/bn6zidj988hc2pvp6k08slj5fk7qfcc9-kmod-27/bin/modprobe")
+        Command::new("/usr/sbin/modprobe")
             .args(&[module])
             .spawn()
             .with_context(|| format!("failed to execute modprobe for {}", module))?
@@ -379,8 +404,30 @@ fn main2() -> anyhow::Result<()> {
     //     io::copy(&mut input, &mut output).unwrap();
     // }
 
+    let mut root_device = get_cmdline_value(&cmdline_key_values, "root")
+        .unwrap_or("/dev/root");
+
+    if get_cmdline_value(&cmdline_key_values, "yscloud.personality").unwrap_or("") == "persist" {
+        mount(
+            Some("/dev/disk/by-label/persist"),
+            "/_next-root/persist",
+            Some("ext4"),
+            MsFlags::empty(),
+            NONE_OF_SLICE,
+        )?;
+
+        Command::new("/usr/sbin/losetup")
+            .args(&["-r", "/dev/loop0", "/_next-root/persist/nix-store.squashfs"])
+            .spawn()
+            .with_context(|| format!("failed to execute losetup"))?
+            .wait()
+            .with_context(|| format!("losetup failed"))?;
+
+        root_device = "/dev/loop0";
+    }
+
     mount(
-        Some("/dev/disk/by-path/virtio-pci-0000:00:04.0"),
+        Some(root_device),
         "/_next-root/nix/.ro-store",
         Some("squashfs"),
         MsFlags::MS_RDONLY,
@@ -419,7 +466,8 @@ fn main2() -> anyhow::Result<()> {
         NONE_OF_SLICE,
     )?;
 
-    visit_dirs("/_next-root/nix/.rw-store", 0)?;
+    visit_dirs("/_next-root/nix/.rw-store", |_, _| true)
+        .with_context(|| format!("{}:{}", file!(), line!()))?;
 
     mount(
         NONE_OF_SLICE,
@@ -429,13 +477,8 @@ fn main2() -> anyhow::Result<()> {
         Some("lowerdir=/_next-root/nix/.ro-store,upperdir=/_next-root/nix/.rw-store/store,workdir=/_next-root/nix/.rw-store/work")
     )?;
 
-    for entry_res in fs::read_dir("/_next-root").unwrap() {
-        let entry = entry_res?;
-
-        println!("found /_next-root entry: {:?}", entry.path().display());
-    }
-
-    nix::unistd::chdir("/_next-root")?;
+    nix::unistd::chdir("/_next-root")
+        .with_context(|| format!("{}:{}", file!(), line!()))?;
 
     mount(
         Some("/"),
@@ -453,21 +496,24 @@ fn main2() -> anyhow::Result<()> {
         NONE_OF_SLICE,
     )?;
 
-    nix::unistd::chroot(".")?;
+    nix::unistd::chroot(".")
+        .with_context(|| format!("{}:{}", file!(), line!()))?;
 
     // Command::new("/nix/store/f7jzmxq9bpbxsg69cszx56mw14n115n5-bash-4.4-p23/bin/bash")
     //     .spawn()?
     //     .wait()?;
+    // if let Err(err) = Command::new("/usr/bin/find")
+    //     .args(&["/.old", "-mount", "-depth", "-delete"])
+    //     .spawn()
+    //     .with_context(|| format!("{}:{}", file!(), line!()))?
+    //     .wait()
+    //     .with_context(|| format!("{}:{}", file!(), line!()))
+    // {
+    //     eprintln!("error clearing out /.old: {}", err);
+    // }
 
-    if let Err(err) = Command::new("/nix/store/93l9n0msl71fw2ba3wbj9y5nx5mbzd8p-system-path/bin/find")
-        .args(&["/.old", "-mount", "-depth", "-delete"])
-        .spawn()?
-        .wait()
-    {
-        eprintln!("error clearing out /.old: {}", err);
-    }
-
-    umount2("/.old", MntFlags::empty())?;
+    umount2("/.old", MntFlags::empty())
+        .with_context(|| format!("{}:{}", file!(), line!()))?;
 
     use std::ffi::{CString, CStr};
     const ARRAY_OF_CSTR_EMPTY: &[&CStr] = &[];
@@ -475,7 +521,9 @@ fn main2() -> anyhow::Result<()> {
     if let Some(vv) = get_cmdline_value(&cmdline_key_values, "nixos-system") {
         let vv = format!("{}/init", vv);
         let init = CString::new(vv).unwrap();
-        if let Err(err) = nix::unistd::execve(&init, &[&init], &ARRAY_OF_CSTR_EMPTY) {
+        if let Err(err) = nix::unistd::execve(&init, &[&init], &ARRAY_OF_CSTR_EMPTY)
+            .with_context(|| format!("{}:{}", file!(), line!()))
+        {
             eprintln!("error execing init: {:?}", err);
         }
     }
@@ -486,7 +534,9 @@ fn main2() -> anyhow::Result<()> {
 }
 
 // one possible implementation of walking a directory only visiting files
-fn visit_dirs<P: AsRef<Path>>(dir: P, indent: usize) -> anyhow::Result<()> {
+fn visit_dirs<F, P: AsRef<Path>>(dir: P, should_print: F) -> anyhow::Result<()>
+    where F: Copy + Fn(&Path, &FileType) -> bool,
+{
     let dir: &Path = dir.as_ref();
     let dir_disp = format!("{}", dir.display());
     if dir_disp.starts_with("/proc") {
@@ -498,18 +548,22 @@ fn visit_dirs<P: AsRef<Path>>(dir: P, indent: usize) -> anyhow::Result<()> {
         .is_dir()
     {
         for entry in fs::read_dir(dir)? {
-            let path = entry
-                .with_context(|| format!("error stating file {}", dir.display()))?
-                .path();
+            let entry = entry
+                .with_context(|| format!("error stating file {}", dir.display()))?;
 
-            let indentation: String = (0..indent).map(|_| ' ').collect();
-            println!("{}{}", indentation, path.display());
+            let path = entry.path();
+            let file_type = entry.file_type()
+                .with_context(|| format!("error stating file {}", path.display()))?;
+
+            if should_print(&path, &file_type) {
+                println!("{}", path.display());
+            }
 
             if fs::metadata(&path)
                 .with_context(|| format!("error stating file {}", path.display()))?
                 .is_dir()
             {
-                visit_dirs(&path, indent + 2)?;
+                visit_dirs(&path, should_print)?;
             }
         }
     }
