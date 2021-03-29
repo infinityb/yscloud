@@ -371,21 +371,9 @@ fn main2() -> anyhow::Result<()> {
         NONE_OF_SLICE,
         "/_next-root/tmp",
         Some("tmpfs"),
-        MsFlags::MS_NOSUID | MsFlags::MS_NODEV | MsFlags::MS_NOEXEC,
+        MsFlags::MS_NOSUID | MsFlags::MS_NODEV,
         Some("size=1048576k")
     )?;
-
-    // mount(
-    //     NONE_OF_SLICE,
-    //     "/_next-root/nix/.rw-store",
-    //     Some("tmpfs"),
-    //     MsFlags::MS_NOSUID | MsFlags::MS_NODEV,
-    //     Some("size=8388608k")
-    // )
-    fs::create_dir("/_next-root/nix/.rw-store/store")
-        .with_context(|| format!("{}:{}", file!(), line!()))?;
-    fs::create_dir("/_next-root/nix/.rw-store/work")
-        .with_context(|| format!("{}:{}", file!(), line!()))?;
 
 
     let modules = vec!["squashfs", "overlay", "ext4", "loop"];
@@ -412,7 +400,7 @@ fn main2() -> anyhow::Result<()> {
             Some("/dev/disk/by-label/persist"),
             "/_next-root/persist",
             Some("ext4"),
-            MsFlags::MS_NOEXEC | MsFlags::MS_NOSUID | MsFlags::MS_NODEV,
+            MsFlags::MS_NODEV, // MsFlags::MS_NOEXEC | MsFlags::MS_NOSUID | 
             NONE_OF_SLICE,
         )?;
 
@@ -425,6 +413,27 @@ fn main2() -> anyhow::Result<()> {
 
         root_device = "/dev/loop0";
     }
+
+    let mut rw_store_store = "/_next-root/nix/.rw-store/store";
+    let mut rw_store_work = "/_next-root/nix/.rw-store/work";
+
+    // mount(
+    //     NONE_OF_SLICE,
+    //     "/_next-root/nix/.rw-store",
+    //     Some("tmpfs"),
+    //     MsFlags::MS_NOSUID | MsFlags::MS_NODEV,
+    //     Some("size=8388608k")
+    // )
+    if get_cmdline_value(&cmdline_key_values, "yscloud.personality").unwrap_or("") == "persist" {
+        fs::create_dir("/_next-root/persist/.rw-store")
+            .with_context(|| format!("{}:{}", file!(), line!()))?;
+        rw_store_store = "/_next-root/persist/.rw-store/store";
+        rw_store_work = "/_next-root/persist/.rw-store/work";
+    }
+    fs::create_dir(rw_store_store)
+        .with_context(|| format!("{}:{}", file!(), line!()))?;
+    fs::create_dir(rw_store_work)
+        .with_context(|| format!("{}:{}", file!(), line!()))?;
 
     mount(
         Some(root_device),
@@ -469,12 +478,17 @@ fn main2() -> anyhow::Result<()> {
     visit_dirs("/_next-root/nix/.rw-store", |_, _| true)
         .with_context(|| format!("{}:{}", file!(), line!()))?;
 
+    let opts = format!("lowerdir={},upperdir={},workdir={}",
+        "/_next-root/nix/.ro-store",
+        rw_store_store,
+        rw_store_work,
+    );
     mount(
         NONE_OF_SLICE,
         "/_next-root/nix/store",
         Some("overlay"),
         MsFlags::empty(),
-        Some("lowerdir=/_next-root/nix/.ro-store,upperdir=/_next-root/nix/.rw-store/store,workdir=/_next-root/nix/.rw-store/work")
+        Some(&opts as &str),
     )?;
 
     nix::unistd::chdir("/_next-root")

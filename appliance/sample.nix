@@ -39,4 +39,20 @@
     ];
     initialHashedPassword = "$6$3eNw0.fMLD0e281n$9g4geVRlsxipj09D2x1LED2yq6mg02jCsS2kZDzK6.rhrtIfoO2eb6oK27a9TUUNKxgiYEN4zTL51pTsZt8f8.";
   };
+
+  systemd.services.hydra-manual-setup = {
+    description = "First launch setup for Hydra";
+    serviceConfig.Type = "oneshot";
+    serviceConfig.RemainAfterExit = true;
+    wantedBy = [ "multi-user.target" ];
+    requires = [ "hydra-init.service" ];
+    after = [ "hydra-init.service" ];
+    # environment = pkgs.lib.mkForce config.systemd.services.hydra-init.environment;
+    script = ''
+      if [ ! -e ~hydra/.setup-is-complete ]; then
+        /run/current-system/sw/bin/hydra-create-user admin --full-name 'Hydra Admin' --email-address 'builds@yshi.org' --password foobar --role admin
+        touch ~hydra/.setup-is-complete
+      fi
+    '';
+  };
 }

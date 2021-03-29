@@ -33,7 +33,7 @@ let
   };
 
 in rec {
-  platformImage = import ./platform-image.nix {
+  platformImage = configuration: import ./platform-image.nix {
     configuration = ./sample.nix;
     extraPackages = [
       rustSource.allWorkspaceMembers
@@ -55,7 +55,7 @@ in rec {
     ${pkgs.coreutils}/bin/mkdir rootfs
     # use cow if we can (`--reflink=auto`) otherwise fall back to copy
     ${pkgs.coreutils}/bin/cp --reflink=auto ${platformImage} rootfs/nix-store.squashfs
-    ${pkgs.e2fsprogs}/bin/mke2fs -L persist -d rootfs $out 16G
+    ${pkgs.e2fsprogs}/bin/mke2fs -L persist -d rootfs $out 80G
   '';
 
   persistFilesystemQemu = pkgs.runCommand "persist-filesystem-qcow2" {
@@ -124,8 +124,7 @@ in rec {
 
   startScriptCloudHypervisor = pkgs.writeScriptBin "run-vm"
     ''
-
-    (test ! -e ./persist.qcow2 && cp ${persistFilesystemQemu} ./persist.qcow2; true)
+    (test ! -e ./persist.qcow2 && cp --reflink=auto ${persistFilesystemQemu} ./persist.qcow2; true)
     ${pkgs.cloud-hypervisor}/bin/cloud-hypervisor \
       --serial tty --console off \
       --cpus boot=12 \
