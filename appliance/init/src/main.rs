@@ -127,6 +127,30 @@ fn main2() -> anyhow::Result<()> {
     use nix::mount::{MsFlags, mount as nix_mount};
     use nix::mount::{umount2, MntFlags};
 
+    fn create_dir<P: AsRef<Path>>(path: P) -> anyhow::Result<()> {
+        let path = path.as_ref();
+
+        fs::create_dir(path)
+            .with_context(|| format!("create {}", path.display()))?;
+
+        Ok(())
+    }
+
+    fn create_dir_allow_existing<P: AsRef<Path>>(path: P) -> anyhow::Result<()> {
+        let err;
+        if let Err(e) = create_dir(path.as_ref()) {
+            err = e;
+        } else {
+            return Ok(());
+        }
+        if let Some(e) = err.downcast_ref::<io::Error>() {
+            if e.kind() == io::ErrorKind::AlreadyExists {
+                return Ok(());
+            }
+        }
+        Err(err)
+    }
+
     fn mount<P1, P2, P3, P4>(
         source: Option<&P1>,
         target: &P2,
@@ -169,20 +193,20 @@ fn main2() -> anyhow::Result<()> {
 
         if line.starts_with("MKDIR ") {
             let dirname = &line[6..];
-            if let Err(err) = fs::create_dir(dirname) {
+            if let Err(err) = create_dir(dirname) {
                 println!("creating {} failed: {}", dirname, err);
             }
         }
     }
 
-    if let Err(err) = fs::create_dir("/proc") {
-        println!("creating /proc failed: {}", err);
+    if let Err(err) = create_dir("/proc") {
+        println!("mkdir failed: {}", err);
     }
-    if let Err(err) = fs::create_dir("/sys") {
-        println!("creating /sys failed: {}", err);
+    if let Err(err) = create_dir("/sys") {
+        println!("mkdir failed: {}", err);
     }
-    if let Err(err) = fs::create_dir("/run") {
-        println!("creating /run failed: {}", err);
+    if let Err(err) = create_dir("/run") {
+        println!("mkdir failed: {}", err);
     }
 
     mount(
@@ -320,8 +344,7 @@ fn main2() -> anyhow::Result<()> {
     //     .spawn()
     //     .expect("failed to execute process");
 
-    fs::create_dir("/_next-root")
-        .with_context(|| format!("{}:{}", file!(), line!()))?;
+    create_dir("/_next-root")?;
 
     mount(
         NONE_OF_SLICE,
@@ -331,33 +354,25 @@ fn main2() -> anyhow::Result<()> {
         Some("size=8388608k")
     )?;
 
-    fs::create_dir("/_next-root/dev")
-        .with_context(|| format!("{}:{}", file!(), line!()))?;
-    fs::create_dir("/_next-root/images")
-        .with_context(|| format!("{}:{}", file!(), line!()))?;
-    fs::create_dir("/_next-root/nix")
-        .with_context(|| format!("{}:{}", file!(), line!()))?;
-    fs::create_dir("/_next-root/nix/store")
-        .with_context(|| format!("{}:{}", file!(), line!()))?;
-    fs::create_dir("/_next-root/proc")
-        .with_context(|| format!("{}:{}", file!(), line!()))?;
-    fs::create_dir("/_next-root/run")
-        .with_context(|| format!("{}:{}", file!(), line!()))?;
-    fs::create_dir("/_next-root/sys")
-        .with_context(|| format!("{}:{}", file!(), line!()))?;
-    fs::create_dir("/_next-root/usr")
-        .with_context(|| format!("{}:{}", file!(), line!()))?;
-    fs::create_dir("/_next-root/tmp")
-        .with_context(|| format!("{}:{}", file!(), line!()))?;
-    fs::create_dir("/_next-root/persist")
-        .with_context(|| format!("{}:{}", file!(), line!()))?;
+    let mkdirs = [
+        "/_next-root/dev",
+        "/_next-root/images",
+        "/_next-root/nix",
+        "/_next-root/nix/store",
+        "/_next-root/proc",
+        "/_next-root/run",
+        "/_next-root/sys",
+        "/_next-root/usr",
+        "/_next-root/tmp",
+        "/_next-root/persist",
+        "/_next-root/nix/.rw-store",
+        "/_next-root/nix/.ro-store",
+        "/_next-root/.old",
+    ];
 
-    fs::create_dir("/_next-root/nix/.rw-store")
-        .with_context(|| format!("{}:{}", file!(), line!()))?;
-    fs::create_dir("/_next-root/nix/.ro-store")
-        .with_context(|| format!("{}:{}", file!(), line!()))?;
-    fs::create_dir("/_next-root/.old")
-        .with_context(|| format!("{}:{}", file!(), line!()))?;
+    for m in &mkdirs {
+        create_dir(m)?;
+    }
 
     // mount(
     //     NONE_OF_SLICE,
@@ -404,6 +419,17 @@ fn main2() -> anyhow::Result<()> {
             NONE_OF_SLICE,
         )?;
 
+        create_dir_allow_existing("/_next-root/persist/var")?;
+        create_dir_allow_existing("/_next-root/var")?;
+
+        mount(
+            Some("/_next-root/persist/var"),
+            "/_next-root/var",
+            NONE_OF_SLICE,
+            MsFlags::MS_BIND,
+            NONE_OF_SLICE,
+        )?;
+
         Command::new("/usr/sbin/losetup")
             .args(&["-r", "/dev/loop0", "/_next-root/persist/nix-store.squashfs"])
             .spawn()
@@ -425,15 +451,13 @@ fn main2() -> anyhow::Result<()> {
     //     Some("size=8388608k")
     // )
     if get_cmdline_value(&cmdline_key_values, "yscloud.personality").unwrap_or("") == "persist" {
-        fs::create_dir("/_next-root/persist/.rw-store")
-            .with_context(|| format!("{}:{}", file!(), line!()))?;
+        create_dir_allow_existing("/_next-root/persist/.rw-store")?;
         rw_store_store = "/_next-root/persist/.rw-store/store";
         rw_store_work = "/_next-root/persist/.rw-store/work";
     }
-    fs::create_dir(rw_store_store)
-        .with_context(|| format!("{}:{}", file!(), line!()))?;
-    fs::create_dir(rw_store_work)
-        .with_context(|| format!("{}:{}", file!(), line!()))?;
+
+    create_dir_allow_existing(rw_store_store)?;
+    create_dir_allow_existing(rw_store_work)?;
 
     mount(
         Some(root_device),
@@ -544,6 +568,7 @@ fn main2() -> anyhow::Result<()> {
 
     sleep(Duration::new(5, 0));
     reboot(RebootMode::RB_POWER_OFF).expect("power off failed");
+
     Ok(())
 }
 

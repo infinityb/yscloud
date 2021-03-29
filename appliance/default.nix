@@ -33,7 +33,7 @@ let
   };
 
 in rec {
-  platformImage = configuration: import ./platform-image.nix {
+  platformImage = import ./platform-image.nix {
     configuration = ./sample.nix;
     extraPackages = [
       rustSource.allWorkspaceMembers

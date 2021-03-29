@@ -19,6 +19,11 @@
   networking.dhcpcd.persistent = true;
   networking.firewall.enable = false;
 
+  services.postgresql = {
+    enable = true;
+    package = pkgs.postgresql_13;
+  };
+
   services.hydra = {
     enable = true;
     hydraURL = "http://localhost:3000";
@@ -26,6 +31,16 @@
     buildMachinesFiles = [];
     useSubstitutes = true;
   };
+
+  # nix.distributedBuilds = true;
+  # nix.buildMachines = [
+  #   { hostName = "build-host-0";
+  #     maxJobs = 2;
+  #     sshKey = "/root/.ssh/id_buildfarm";
+  #     sshUser = "builder";
+  #     system = "x86_64-linux";
+  #   }
+  # ];
 
   # "shark123123"
   users.users."root".initialHashedPassword = "$6$3eNw0.fMLD0e281n$9g4geVRlsxipj09D2x1LED2yq6mg02jCsS2kZDzK6.rhrtIfoO2eb6oK27a9TUUNKxgiYEN4zTL51pTsZt8f8.";

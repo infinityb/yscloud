@@ -3,5 +3,5 @@
   configuration,
 }: pkgs.callPackage <nixpkgs/nixos/lib/make-squashfs.nix> {
   storeContents = configuration.packages;
-  comp = "gzip -noD";
+  # comp = "gzip -noD";
 }
