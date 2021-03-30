@@ -1,8 +1,1 @@
-{
-  "netlink-packet-audit 0.2.2 (git+https://github.com/little-dude/netlink#35b6cb9801dff84e21409ea04012c749ea9a9970)": "1f21vlspa4k59jcihmvykrv634kand0yvw4zjska4f7b2lpq1j66",
-  "netlink-packet-core 0.2.4 (git+https://github.com/little-dude/netlink#35b6cb9801dff84e21409ea04012c749ea9a9970)": "1f21vlspa4k59jcihmvykrv634kand0yvw4zjska4f7b2lpq1j66",
-  "netlink-packet-route 0.7.0 (git+https://github.com/little-dude/netlink#35b6cb9801dff84e21409ea04012c749ea9a9970)": "1f21vlspa4k59jcihmvykrv634kand0yvw4zjska4f7b2lpq1j66",
-  "netlink-packet-utils 0.4.0 (git+https://github.com/little-dude/netlink#35b6cb9801dff84e21409ea04012c749ea9a9970)": "1f21vlspa4k59jcihmvykrv634kand0yvw4zjska4f7b2lpq1j66",
-  "netlink-proto 0.6.0 (git+https://github.com/little-dude/netlink#35b6cb9801dff84e21409ea04012c749ea9a9970)": "1f21vlspa4k59jcihmvykrv634kand0yvw4zjska4f7b2lpq1j66",
-  "netlink-sys 0.6.0 (git+https://github.com/little-dude/netlink#35b6cb9801dff84e21409ea04012c749ea9a9970)": "1f21vlspa4k59jcihmvykrv634kand0yvw4zjska4f7b2lpq1j66"
-}
+{}

@@ -1,7 +1,7 @@
 {
   configuration ? import ./lib/from-env.nix "NIXOS_CONFIG" <nixos-config>,
   system ? builtins.currentSystem,
-  extraPackages ? []
+  extraPackages ? [],
 }:
 
 let
@@ -28,11 +28,17 @@ let
       ];
   }).config;
 
-in makeSquashImage {
-  configuration = {
-    packages = [ eval.config.system.build.toplevel ] ++ extraPackages;
+in rec {
+  inherit eval;
+
+  toplevel = eval.config.system.build.toplevel;
+
+  image = makeSquashImage {
+    configuration = {
+      packages = [ toplevel ] ++ extraPackages;
+    };
   };
-} // { toplevel = eval.config.system.build.toplevel; }
+}
 
 # {
 #   inherit (eval) pkgs config options;

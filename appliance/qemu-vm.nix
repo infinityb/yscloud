@@ -13,8 +13,6 @@ with lib;
 with import <nixpkgs/nixos/lib/qemu-flags.nix> { inherit pkgs; };
 
 let
-
-
   cfg = config.virtualisation;
 
   qemu = cfg.qemu.package;
@@ -265,6 +263,14 @@ in
   ];
 
   options = {
+    virtualisation.macaddr = mkOption {
+      default = "";
+
+      description = 
+        ''
+          The MAC address to use
+        '';
+    };
 
     virtualisation.fileSystems = options.fileSystems;
 

@@ -11,5 +11,5 @@ edition = "2018"
 ksuid = { path = "../ksuid" }
 
 # external
-askama = "0.8"
+askama = "0.10.5"
 uuid = { version = "0.8.1", features = ["v4", "serde"] }

@@ -10,4 +10,4 @@ edition = "2018"
 yscloud-config-model = {path = "../../yscloud-config-model" }
 sockets = { path = "../sockets" }
 serde = { version = "1.0", features = ["derive"] }
-nix = "0.13"
+nix = "0.20.0"

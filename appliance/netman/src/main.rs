@@ -14,11 +14,12 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use futures::StreamExt;
 use libc::{c_int, IPPROTO_ICMPV6};
 use libc::{in6_addr, in6_pktinfo, sockaddr, sockaddr_in6};
+use nix::cmsg_space;
 use nix::sys::reboot::{reboot, RebootMode};
 use nix::mount::{MsFlags, mount};
 use nix::sys::socket::sockopt::Ipv6RecvPacketInfo;
 use nix::sys::socket::{
-    recvmsg, setsockopt, AddressFamily, CmsgSpace, ControlMessage, MsgFlags, SetSockOpt, SockFlag,
+    recvmsg, setsockopt, AddressFamily, ControlMessageOwned, MsgFlags, SetSockOpt, SockFlag,
     SockType,
 };
 use chrono::offset::{TimeZone, Local};
@@ -274,13 +275,14 @@ async fn main2() -> Result<(), Box<dyn ::std::error::Error>> {
 
     let mut rbuf = vec![0; 1500];
 
-    let mut cmsg: CmsgSpace<[u8; 64]> = CmsgSpace::new(); // made up types and count
+
+    let mut cmsgs = cmsg_space!(in6_pktinfo);
     let flags = MsgFlags::empty();
     for i in 0..3000_u64 {
         let rxm = recvmsg(
             fd,
             &[IoVec::from_mut_slice(&mut rbuf)],
-            Some(&mut cmsg),
+            Some(&mut cmsgs),
             flags,
         )
         .unwrap();
@@ -304,7 +306,7 @@ async fn main2() -> Result<(), Box<dyn ::std::error::Error>> {
         }
         for m in rxm.cmsgs() {
             match m {
-                ControlMessage::Ipv6PacketInfo(v) => {
+                ControlMessageOwned::Ipv6PacketInfo(v) => {
                     target_address = v.ipi6_addr.s6_addr.into();
                     interface_index = v.ipi6_ifindex;
                     target_init = true;

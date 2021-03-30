@@ -7,4 +7,4 @@ edition = "2018"
 [dependencies]
 # internal
 owned_fd = { path = "../owned_fd" }
-nix = "0.19"
+nix = "0.20.0"

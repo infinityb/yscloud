@@ -14,6 +14,8 @@
     fileSystems = {};
   };
 
+  virtualisation.macaddr = "2e:d3:04:52:b1:af";
+
   networking.enableIPv6 = true;
   networking.useDHCP = true;
   networking.dhcpcd.persistent = true;

@@ -13,6 +13,42 @@ let
   #  firmware = firmware;
   #  allowMissing = true;
   # };
+in rec {
+  platformImage = (import ./platform-image.nix {
+    configuration = ./sample.nix;
+    extraPackages = [
+      rustSource.allWorkspaceMembers
+      pkgs.cryptsetup
+      pkgs.zfs
+    ];
+  });
+
+  persistFilesystemRaw = pkgs.runCommand "persist-filesystem" {
+    envVariable = true;
+  } ''
+    set -e
+    ${pkgs.coreutils}/bin/mkdir rootfs
+    # use cow if we can (`--reflink=auto`) otherwise fall back to copy
+    ${pkgs.coreutils}/bin/cp --reflink=auto ${platformImage.image} rootfs/nix-store.squashfs
+    ${pkgs.e2fsprogs}/bin/mke2fs -L persist -d rootfs $out 80G
+  '';
+
+  persistFilesystemQemu = pkgs.runCommand "persist-filesystem-qcow2" {
+    envVariable = true;
+  } ''
+    ${pkgs.qemu}/bin/qemu-img convert -f raw -O qcow2 ${persistFilesystemRaw} $out
+  '';
+
+  # # HACK: add ${pkgs.linuxPackages.zfs} here if we need the zfs modules
+  # # 
+  # bootStageHelper = (platformImage.withPkgs pkgs).bootStageHelper;
+  # initrd = (platformImage.withPkgs pkgs).initrd;
+  # startScriptQemu = (platformImage.withPkgs pkgs).startScriptQemu;
+  # # startScriptCloudHypervisor = (platformImage.withPkgs pkgs).startScriptCloudHypervisor;
+  # startScriptCloudHypervisorTest = (platformImage.withPkgs pkgs).startScriptCloudHypervisorTest;
+  # printMacAddr = (platformImage.withPkgs pkgs).printMacAddr;
+  # platformImageQcow2 = (platformImage.withPkgs pkgs).platformImageQcow2;
+
   modulesClosure = pkgs.makeModulesClosure {
     rootModules = [
       # Standard hardware
@@ -31,38 +67,6 @@ let
     kernel = pkgs.linuxPackages.kernel;
     firmware = [];
   };
-
-in rec {
-  platformImage = import ./platform-image.nix {
-    configuration = ./sample.nix;
-    extraPackages = [
-      rustSource.allWorkspaceMembers
-      pkgs.cryptsetup
-      pkgs.zfs
-    ];
-  };
-
-  platformImageQcow2 = pkgs.runCommand "platform-image-qcow2" {
-    envVariable = true;
-  } ''
-    ${pkgs.qemu}/bin/qemu-img convert -f raw -O qcow2 ${platformImage} $out
-  '';
-
-  persistFilesystemRaw = pkgs.runCommand "persist-filesystem" {
-    envVariable = true;
-  } ''
-    set -e
-    ${pkgs.coreutils}/bin/mkdir rootfs
-    # use cow if we can (`--reflink=auto`) otherwise fall back to copy
-    ${pkgs.coreutils}/bin/cp --reflink=auto ${platformImage} rootfs/nix-store.squashfs
-    ${pkgs.e2fsprogs}/bin/mke2fs -L persist -d rootfs $out 80G
-  '';
-
-  persistFilesystemQemu = pkgs.runCommand "persist-filesystem-qcow2" {
-    envVariable = true;
-  } ''
-    ${pkgs.qemu}/bin/qemu-img convert -f raw -O qcow2 ${persistFilesystemRaw} $out
-  '';
 
   # HACK: add ${pkgs.linuxPackages.zfs} here if we need the zfs modules
   # 
@@ -86,9 +90,8 @@ in rec {
       LINK /bin/bash ${pkgs.bash}/bin/bash
     '';
 
-  initrd = makeInitrd {
+  initrd = pkgs.makeInitrd {
     name = "initrd-${pkgs.linuxPackages.kernel.name}";
-
     contents = [
       { object = "${rustSource.workspaceMembers."appliance-init".build}/bin/appliance-init";
         symlink = "/init";
@@ -98,6 +101,12 @@ in rec {
       }
     ];
   };
+
+  platformImageQcow2 = pkgs.runCommand "platform-image-qcow2" {
+    envVariable = true;
+  } ''
+    ${pkgs.qemu}/bin/qemu-img convert -f raw -O qcow2 ${image} $out
+  '';
 
   startScriptQemu = pkgs.writeScriptBin "run-vm"
     ''
@@ -122,18 +131,9 @@ in rec {
       --kernel-opts="console=ttyS0 nixos-system=${platformImage.toplevel} noapic reboot=k panic=1 pci=off rw"
     '';
 
-  startScriptCloudHypervisor = pkgs.writeScriptBin "run-vm"
+  printMacAddr = pkgs.writeScriptBin "print-mac"
     ''
-    (test ! -e ./persist.qcow2 && cp --reflink=auto ${persistFilesystemQemu} ./persist.qcow2; true)
-    ${pkgs.cloud-hypervisor}/bin/cloud-hypervisor \
-      --serial tty --console off \
-      --cpus boot=12 \
-      --memory size=12000M \
-      --kernel=${pkgs.linuxPackages.kernel}/bzImage \
-      --initramfs=${initrd}/initrd.gz \
-      --disk path=./persist.qcow2,readonly=off \
-      --net "tap=,mac=,ip=,mask=" --rng \
-      --cmdline="console=ttyS0 yscloud.personality=persist root=/dev/vda nixos-system=${platformImage.toplevel}"
+    echo ${platformImage.eval.config.virtualisation.macaddr}
     '';
 
   startScriptCloudHypervisorTest = pkgs.writeScriptBin "run-vm"
@@ -144,8 +144,22 @@ in rec {
       --memory size=1024M \
       --kernel=${pkgs.linuxPackages.kernel}/bzImage \
       --initramfs=${initrd}/initrd.gz \
-      --disk path=${platformImage},readonly=on,id=0 \
-      --net "tap=,mac=,ip=,mask=" --rng \
+      --disk path=${image},readonly=on,id=0 \
+      --net "tap=,mac=${platformImage.eval.config.virtualisation.macaddr},ip=,mask=" --rng \
       --cmdline="console=ttyS0 root=/dev/vda nixos-system=${platformImage.toplevel}"
+    '';
+
+  startScriptCloudHypervisor = pkgs.writeScriptBin "run-vm"
+    ''
+    (test ! -e ./persist.qcow2 && cp --reflink=auto ${persistFilesystemQemu} ./persist.qcow2; true)
+    ${pkgs.cloud-hypervisor}/bin/cloud-hypervisor \
+      --serial tty --console off \
+      --cpus boot=12 \
+      --memory size=12000M \
+      --kernel=${pkgs.linuxPackages.kernel}/bzImage \
+      --initramfs=${initrd}/initrd.gz \
+      --disk path=./persist.qcow2,readonly=off \
+      --net "tap=,mac=${platformImage.eval.config.virtualisation.macaddr},ip=,mask=" --rng \
+      --cmdline="console=ttyS0 yscloud.personality=persist root=/dev/vda nixos-system=${platformImage.toplevel}"
     '';
 }
