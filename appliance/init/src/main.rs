@@ -178,7 +178,6 @@ fn main2() -> anyhow::Result<()> {
 
     std::env::set_var("RUST_BACKTRACE", "full");
 
-    // PATH=/nix/store/93l9n0msl71fw2ba3wbj9y5nx5mbzd8p-system-path/bin
     let config = File::open("/init.config")?;
     let config = BufReader::new(config);
     for line in config.lines() {
