@@ -3665,9 +3665,9 @@ rec {
       };
       "num" = rec {
         crateName = "num";
-        version = "0.4.0";
-        edition = "2018";
-        sha256 = "01j6k8kjad0a96297j3qjhdhrc6cgmzhf52i0sd7yd0d2z8ndns3";
+        version = "0.1.42";
+        edition = "2015";
+        sha256 = "0vhmyvfan380f86895z0f8rjscjc6qvwcmyvm15370ik2mjas0s7";
         authors = [
           "The Rust Project Developers"
         ];
@@ -3676,52 +3676,45 @@ rec {
             name = "num-bigint";
             packageId = "num-bigint";
             optional = true;
-            usesDefaultFeatures = false;
           }
           {
             name = "num-complex";
             packageId = "num-complex";
-            usesDefaultFeatures = false;
+            optional = true;
           }
           {
             name = "num-integer";
             packageId = "num-integer";
-            usesDefaultFeatures = false;
-            features = [ "i128" ];
           }
           {
             name = "num-iter";
             packageId = "num-iter";
-            usesDefaultFeatures = false;
-            features = [ "i128" ];
           }
           {
             name = "num-rational";
             packageId = "num-rational";
-            usesDefaultFeatures = false;
+            optional = true;
           }
           {
             name = "num-traits";
             packageId = "num-traits";
-            usesDefaultFeatures = false;
-            features = [ "i128" ];
           }
         ];
         features = {
-          "alloc" = [ "num-bigint" "num-rational/num-bigint" ];
-          "default" = [ "std" ];
-          "libm" = [ "num-complex/libm" "num-traits/libm" ];
-          "rand" = [ "num-bigint/rand" "num-complex/rand" ];
+          "bigint" = [ "num-bigint" ];
+          "complex" = [ "num-complex" ];
+          "default" = [ "bigint" "complex" "rational" "rustc-serialize" ];
+          "rational" = [ "num-rational" ];
+          "rustc-serialize" = [ "num-bigint/rustc-serialize" "num-complex/rustc-serialize" "num-rational/rustc-serialize" ];
           "serde" = [ "num-bigint/serde" "num-complex/serde" "num-rational/serde" ];
-          "std" = [ "num-bigint/std" "num-complex/std" "num-integer/std" "num-iter/std" "num-rational/std" "num-rational/num-bigint-std" "num-traits/std" ];
         };
-        resolvedDefaultFeatures = [ "default" "num-bigint" "std" ];
+        resolvedDefaultFeatures = [ "bigint" "complex" "default" "num-bigint" "num-complex" "num-rational" "rational" "rustc-serialize" ];
       };
       "num-bigint" = rec {
         crateName = "num-bigint";
-        version = "0.4.0";
-        edition = "2018";
-        sha256 = "04k5xh7d0nxay4yfb02rj841y9g5jh45d320avi53ak221y083af";
+        version = "0.1.44";
+        edition = "2015";
+        sha256 = "1hg80xd7vd5yqzks1h0zk2fcgqnf84m2cdj9q4cffk581nnrjf76";
         authors = [
           "The Rust Project Developers"
         ];
@@ -3730,32 +3723,40 @@ rec {
             name = "num-integer";
             packageId = "num-integer";
             usesDefaultFeatures = false;
-            features = [ "i128" ];
           }
           {
             name = "num-traits";
             packageId = "num-traits";
             usesDefaultFeatures = false;
-            features = [ "i128" ];
+            features = [ "std" ];
+          }
+          {
+            name = "rand";
+            packageId = "rand 0.4.6";
+            optional = true;
+          }
+          {
+            name = "rustc-serialize";
+            packageId = "rustc-serialize";
+            optional = true;
           }
         ];
-        buildDependencies = [
+        devDependencies = [
           {
-            name = "autocfg";
-            packageId = "autocfg";
+            name = "rand";
+            packageId = "rand 0.4.6";
           }
         ];
         features = {
-          "default" = [ "std" ];
-          "std" = [ "num-integer/std" "num-traits/std" ];
+          "default" = [ "rand" "rustc-serialize" ];
         };
-        resolvedDefaultFeatures = [ "std" ];
+        resolvedDefaultFeatures = [ "default" "rand" "rustc-serialize" ];
       };
       "num-complex" = rec {
         crateName = "num-complex";
-        version = "0.4.0";
-        edition = "2018";
-        sha256 = "11ahq51ibf7x30rsabgp3a29zw6d6bfilz53sj152z5vpdkkd1r6";
+        version = "0.1.43";
+        edition = "2015";
+        sha256 = "0mln3h018lar511hadjwfkbyq1561s8kdzfg8aagbakqg0fn725j";
         authors = [
           "The Rust Project Developers"
         ];
@@ -3764,15 +3765,18 @@ rec {
             name = "num-traits";
             packageId = "num-traits";
             usesDefaultFeatures = false;
-            features = [ "i128" ];
+            features = [ "std" ];
+          }
+          {
+            name = "rustc-serialize";
+            packageId = "rustc-serialize";
+            optional = true;
           }
         ];
         features = {
-          "default" = [ "std" ];
-          "libm" = [ "num-traits/libm" ];
-          "std" = [ "num-traits/std" ];
+          "default" = [ "rustc-serialize" ];
         };
-        resolvedDefaultFeatures = [ "std" ];
+        resolvedDefaultFeatures = [ "default" "rustc-serialize" ];
       };
       "num-integer" = rec {
         crateName = "num-integer";
@@ -3800,7 +3804,7 @@ rec {
           "i128" = [ "num-traits/i128" ];
           "std" = [ "num-traits/std" ];
         };
-        resolvedDefaultFeatures = [ "i128" "std" ];
+        resolvedDefaultFeatures = [ "default" "std" ];
       };
       "num-iter" = rec {
         crateName = "num-iter";
@@ -3833,13 +3837,13 @@ rec {
           "i128" = [ "num-integer/i128" "num-traits/i128" ];
           "std" = [ "num-integer/std" "num-traits/std" ];
         };
-        resolvedDefaultFeatures = [ "i128" "std" ];
+        resolvedDefaultFeatures = [ "default" "std" ];
       };
       "num-rational" = rec {
         crateName = "num-rational";
-        version = "0.4.0";
-        edition = "2018";
-        sha256 = "0ska19zb05f84b1cki7vyzy5wjqs26y82hiq1d9gabbw2syh45yl";
+        version = "0.1.42";
+        edition = "2015";
+        sha256 = "0kkqb8j3b3nis9hs4ww4hkrmb4a6v9sr9al08xmwhgvmpms4qcgf";
         authors = [
           "The Rust Project Developers"
         ];
@@ -3848,33 +3852,29 @@ rec {
             name = "num-bigint";
             packageId = "num-bigint";
             optional = true;
-            usesDefaultFeatures = false;
           }
           {
             name = "num-integer";
             packageId = "num-integer";
             usesDefaultFeatures = false;
-            features = [ "i128" ];
           }
           {
             name = "num-traits";
             packageId = "num-traits";
             usesDefaultFeatures = false;
-            features = [ "i128" ];
+            features = [ "std" ];
           }
-        ];
-        buildDependencies = [
           {
-            name = "autocfg";
-            packageId = "autocfg";
+            name = "rustc-serialize";
+            packageId = "rustc-serialize";
+            optional = true;
           }
         ];
         features = {
-          "default" = [ "num-bigint-std" "std" ];
-          "num-bigint-std" = [ "num-bigint/std" ];
-          "std" = [ "num-integer/std" "num-traits/std" ];
+          "bigint" = [ "num-bigint" ];
+          "default" = [ "bigint" "rustc-serialize" ];
         };
-        resolvedDefaultFeatures = [ "num-bigint" "num-bigint-std" "std" ];
+        resolvedDefaultFeatures = [ "bigint" "default" "num-bigint" "rustc-serialize" ];
       };
       "num-traits" = rec {
         crateName = "num-traits";
@@ -3893,7 +3893,7 @@ rec {
         features = {
           "default" = [ "std" ];
         };
-        resolvedDefaultFeatures = [ "default" "i128" "std" ];
+        resolvedDefaultFeatures = [ "default" "std" ];
       };
       "num_cpus" = rec {
         crateName = "num_cpus";
@@ -5174,6 +5174,16 @@ rec {
         features = {
           "rustc-dep-of-std" = [ "core" "compiler_builtins" ];
         };
+      };
+      "rustc-serialize" = rec {
+        crateName = "rustc-serialize";
+        version = "0.3.24";
+        edition = "2015";
+        sha256 = "1nkg3vasg7nk80ffkazizgiyv3hb1l9g3d8h17cajbkx538jiwfw";
+        authors = [
+          "The Rust Project Developers"
+        ];
+
       };
       "rustc_version" = rec {
         crateName = "rustc_version";
