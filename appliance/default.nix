@@ -105,7 +105,7 @@ in rec {
   platformImageQcow2 = pkgs.runCommand "platform-image-qcow2" {
     envVariable = true;
   } ''
-    ${pkgs.qemu}/bin/qemu-img convert -f raw -O qcow2 ${image} $out
+    ${pkgs.qemu}/bin/qemu-img convert -f raw -O qcow2 ${platformImage.image} $out
   '';
 
   startScriptQemu = pkgs.writeScriptBin "run-vm"
