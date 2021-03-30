@@ -8682,8 +8682,7 @@ rec {
           {
             name = "tokio";
             packageId = "tokio 0.2.20";
-            usesDefaultFeatures = false;
-            features = [ "rt-core" "tcp" "uds" "time" "stream" "sync" ];
+            features = [ "full" ];
           }
           {
             name = "tracing";
