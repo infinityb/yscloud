@@ -121,6 +121,7 @@ fn test_partition_def_to_path() {
 
 #[cfg(target_os = "linux")]
 fn main2() -> anyhow::Result<()> {
+    // ci test
     use nix::NixPath;
     use std::fmt::Debug;
     use nix::sys::reboot::{reboot, RebootMode};
