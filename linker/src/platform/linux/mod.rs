@@ -259,7 +259,7 @@ impl ExecExtras {
     pub fn builder() -> ExecExtrasBuilder {
         let mut builder: ExecExtrasBuilder = Default::default();
         builder.seccomp_props.insert("@network");
-        // builder.seccomp_props.add("*");
+        builder.seccomp_props.insert("*");
         builder
     }
 }

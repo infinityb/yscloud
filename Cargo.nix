@@ -8589,7 +8589,7 @@ rec {
       };
       "yscloud-linker" = rec {
         crateName = "yscloud-linker";
-        version = "0.1.7";
+        version = "0.1.9";
         edition = "2018";
         crateBin = [
           { name = "yscloud-linker"; path = "src/main.rs"; }
