@@ -199,7 +199,7 @@ mod tests {
         use std::collections::BTreeMap;
 
         use semver::{Version, VersionReq};
-        use tokio::runtime::current_thread::Runtime;
+        use tokio::runtime::Runtime;
 
         use yscloud_config_model::{
             permissions, ApplicationDeploymentRequirement, ApplicationDeploymentTemplate,
@@ -277,7 +277,7 @@ mod tests {
         );
         let registry = RegistryShared::shared(registry);
 
-        let xx = serde_json::from_str(r#"{
+        let _: serde_json::Value = serde_json::from_str(r#"{
             "deployment_name": "aibi.yshi.org",
             "public_services": [
                 {
