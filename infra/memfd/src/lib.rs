@@ -146,7 +146,7 @@ impl MemFdOptions {
 
 #[cfg(test)]
 mod tests {
-    use nix::fcntl::SealFlag::{F_SEAL_GROW, F_SEAL_SEAL, F_SEAL_SHRINK};
+    use nix::fcntl::SealFlag;
 
     use super::{MemFd, MemFdOptions};
 
@@ -168,14 +168,14 @@ mod tests {
             .unwrap();
 
         memfile
-            .seal(F_SEAL_SEAL | F_SEAL_SHRINK | F_SEAL_GROW)
+            .seal(SealFlag::F_SEAL_SEAL | SealFlag::F_SEAL_SHRINK | SealFlag::F_SEAL_GROW)
             .unwrap();
 
-        let mut file = big.into_owned_fd().into_file();
+        let mut file = memfile.into_owned_fd().into_file();
 
         let mut buf = [0; 256];
-        for (o, i) in buf.iter_mut().zip(0..) {
-            *o = i;
+        for (o, i) in buf.iter_mut().zip(0u32..) {
+            *o = (i % 256) as u8;
         }
 
         let mut wrote = 0;
