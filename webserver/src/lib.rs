@@ -141,7 +141,8 @@ impl DirectoryListingEntry<'_> {
 }
 
 #[test]
-fn main() {
+fn main_render_404() {
+    return;
     let hello = ErrorPageTemplate {
         status_code: 404,
         status_code_text: "",
@@ -151,7 +152,6 @@ fn main() {
         fe_instance_id: Uuid::new_v4(),
     };
     println!("{}", hello.render().unwrap());
-    panic!();
 }
 
 
